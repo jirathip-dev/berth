@@ -69,6 +69,8 @@ protocol over stdin/stdout for SSH.
 
 ## Non-goals
 
+- **No TUI or multiplexer** (owner, 2026-11-03: "Ok so attach only then"). Use `berth attach` in any terminal app, plus
+  herdsman's web board for the overview. For side-by-side viewing, run `berth attach <t>` inside herdr or tmux panes.
 - No TUI layouts, tabs, splits, themes or plugins.
 - No worktree management (herdsman does `git worktree` itself).
 - No agent-brand detection. Programs report their state; a screen-text fallback is optional and per-harness.
