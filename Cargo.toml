@@ -15,7 +15,10 @@ berth-proto = { path = "crates/berth-proto" }
 berth-core = { path = "crates/berth-core" }
 berth-server = { path = "crates/berth-server" }
 clap = { version = "=4.6.7", features = ["derive"] }
+pty-process = "=0.5.4"
+rustix = { version = "=1.1.6", features = ["param", "process"] }
 thiserror = "=2.0.21"
+vte = { version = "=0.15.0", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
