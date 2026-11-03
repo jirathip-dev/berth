@@ -7,11 +7,12 @@
 pub mod acp;
 pub mod agents;
 mod events;
+pub mod machines;
 mod registry;
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, BufRead as _, BufReader, Write as _};
+use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::net::Shutdown;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -61,6 +62,37 @@ pub enum Error {
     /// An I/O error.
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// The config file or a `machine add` argument is not valid.
+    #[error("{0}")]
+    Config(String),
+    /// No machine has that name.
+    #[error("no machine {0}; see `berth machine ls`")]
+    NoMachine(String),
+    /// The berth on a machine is another version.
+    #[error(
+        "BERTH_VERSION: berth {here} here, {there} on {machine}; install the same version on both, e.g. \
+         on {machine}: `cargo install --locked --git https://github.com/jirathip-dev/berth --tag v{here} \
+         berth`, then restart its server"
+    )]
+    MachineVersion {
+        /// The machine.
+        machine: String,
+        /// This berth's version.
+        here: String,
+        /// The version of the server on the machine.
+        there: String,
+    },
+    /// `ssh` or the berth on a machine gave no answer.
+    #[error(
+        "no answer from berth on {machine}; check that `ssh {target} berth hello` works with key login \
+         and that a server runs there (`berth serve --detach`)"
+    )]
+    Unreachable {
+        /// The machine.
+        machine: String,
+        /// Its ssh target.
+        target: String,
+    },
 }
 
 /// Where a server listens and keeps its state.
@@ -70,6 +102,8 @@ pub struct Paths {
     pub socket: PathBuf,
     /// The state file.
     pub state: PathBuf,
+    /// The config file (machines).
+    pub config: PathBuf,
 }
 
 impl Paths {
@@ -79,12 +113,14 @@ impl Paths {
         Self {
             socket: dir.join("berth.sock"),
             state: dir.join("state.json"),
+            config: dir.join("config.toml"),
         }
     }
 
-    /// The per-user defaults. macOS: `~/Library/Caches/berth/berth.sock` and
-    /// `~/Library/Application Support/berth/state.json`. Elsewhere: `$XDG_RUNTIME_DIR/berth.sock` and
-    /// `$XDG_STATE_HOME/berth/state.json` (default `~/.local/state`).
+    /// The per-user defaults. macOS: `~/Library/Caches/berth/berth.sock`, and `state.json` and
+    /// `config.toml` in `~/Library/Application Support/berth/`. Elsewhere: `$XDG_RUNTIME_DIR/berth.sock`,
+    /// `$XDG_STATE_HOME/berth/state.json` (default `~/.local/state`) and
+    /// `$XDG_CONFIG_HOME/berth/config.toml` (default `~/.config`).
     ///
     /// # Errors
     /// [`Error::NoHome`] or [`Error::NoRuntimeDir`] when the variables they need are unset.
@@ -96,16 +132,16 @@ impl Paths {
             return Ok(Self {
                 socket: lib.join("Caches/berth/berth.sock"),
                 state: lib.join("Application Support/berth/state.json"),
+                config: lib.join("Application Support/berth/config.toml"),
             });
         }
         let runtime = var("XDG_RUNTIME_DIR").ok_or(Error::NoRuntimeDir)?;
-        let state = match var("XDG_STATE_HOME") {
-            Some(dir) => PathBuf::from(dir),
-            None => home?.join(".local/state"),
-        };
+        let home = home?;
+        let xdg = |k, default| var(k).map_or_else(|| home.join(default), PathBuf::from);
         Ok(Self {
             socket: PathBuf::from(runtime).join("berth.sock"),
-            state: state.join("berth/state.json"),
+            state: xdg("XDG_STATE_HOME", ".local/state").join("berth/state.json"),
+            config: xdg("XDG_CONFIG_HOME", ".config").join("berth/config.toml"),
         })
     }
 }
@@ -426,7 +462,15 @@ impl Client {
     /// [`Error::Rpc`] with `BERTH_VERSION: client x, server y; restart the server` on a version
     /// mismatch; [`Error::Io`] when nothing listens.
     pub fn connect(socket: &Path) -> Result<Self, Error> {
-        let writer = UnixStream::connect(socket)?;
+        Self::over(UnixStream::connect(socket)?)
+    }
+
+    /// Speaks the protocol over `writer`, a connected stream (a socket, or one end of a socketpair
+    /// whose other end is `ssh … berth connect`), and checks the server runs this version.
+    ///
+    /// # Errors
+    /// As [`Client::connect`].
+    pub fn over(writer: UnixStream) -> Result<Self, Error> {
         let mut client = Self {
             reader: BufReader::new(writer.try_clone()?),
             writer,
@@ -492,4 +536,28 @@ pub fn notification<P: Serialize>(method: Method, params: &P) -> Result<Vec<u8>,
     let mut line = serde_json::to_vec(&request)?;
     line.push(b'\n');
     Ok(line)
+}
+
+/// `berth connect`: carries the protocol between stdin/stdout and the server on `socket` (for
+/// `ssh host berth connect`) until either side closes.
+///
+/// # Errors
+/// [`Error::Io`] when nothing listens on `socket` or the copy fails.
+pub fn relay(socket: &Path) -> Result<(), Error> {
+    let mut stream = UnixStream::connect(socket)?;
+    let mut up = stream.try_clone()?;
+    std::thread::spawn(move || {
+        let _ = io::copy(&mut io::stdin().lock(), &mut up);
+        let _ = up.shutdown(Shutdown::Write);
+    });
+    let mut out = io::stdout().lock();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = stream.read(&mut buf)?;
+        if n == 0 {
+            return Ok(());
+        }
+        out.write_all(&buf[..n])?;
+        out.flush()?;
+    }
 }

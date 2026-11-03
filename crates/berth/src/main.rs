@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, bail};
 use berth_server::acp::{self, Input, Policy};
 use berth_server::agents;
+use berth_server::machines::{self, Machine};
 use berth_server::proto::{
     EventsParams, KeysParams, LsParams, Method, ReadParams, ReadResult, Reported, RunParams,
     SendParams, State, StateParams, Target, TerminalInfo, WaitOutcome, WaitParams, WaitResult,
@@ -34,6 +35,9 @@ struct Cli {
     /// Print JSON instead of text.
     #[arg(long, global = true)]
     json: bool,
+    /// Run the command on this machine (`berth machine add`) over SSH.
+    #[arg(long, global = true, value_name = "MACHINE")]
+    on: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -161,6 +165,15 @@ enum Command {
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
+    /// Speak the protocol over stdin/stdout, for `ssh host berth connect`.
+    Connect {
+        /// Start `berth serve --detach` first when no server runs.
+        #[arg(long)]
+        autostart: bool,
+    },
+    /// Machines that `--on` reaches over SSH (key login only).
+    #[command(subcommand)]
+    Machine(MachineCommand),
 }
 
 #[derive(Subcommand)]
@@ -178,6 +191,79 @@ enum AgentsCommand {
         /// The agent id.
         id: String,
     },
+}
+
+/// `berth machine …`.
+#[derive(Subcommand)]
+enum MachineCommand {
+    /// Add a machine: a name for an ssh target, `[user@]host`.
+    Add {
+        /// The name `--on` takes.
+        name: String,
+        /// The ssh target.
+        target: String,
+    },
+    /// List the machines.
+    Ls,
+    /// Remove a machine.
+    Rm {
+        /// The machine.
+        name: String,
+    },
+}
+
+/// Where the commands go: the local server, or the one on `--on`'s machine.
+struct Server<'a> {
+    paths: &'a Paths,
+    dir: Option<&'a Path>,
+    on: Option<Machine>,
+}
+
+impl Server<'_> {
+    /// The server `command` goes to: `--on`'s machine (refused for the local-only commands), else this one.
+    fn new<'a>(
+        paths: &'a Paths,
+        dir: Option<&'a Path>,
+        on: Option<String>,
+        command: &Command,
+    ) -> anyhow::Result<Server<'a>> {
+        let local = matches!(
+            command,
+            Command::Hello
+                | Command::Serve { .. }
+                | Command::Connect { .. }
+                | Command::Machine(_)
+                | Command::Agents { .. }
+                | Command::AcpBridge { .. }
+        );
+        if local && on.is_some() {
+            bail!(
+                "--on takes the terminal commands (run, ls, read, …), not hello, serve, connect, machine or agents"
+            );
+        }
+        Ok(Server {
+            paths,
+            dir,
+            on: on
+                .map(|name| machines::find(&paths.config, &name))
+                .transpose()?,
+        })
+    }
+
+    /// A client: over SSH with `--on` (`autostart` passed on), else the local one ([`connect`]).
+    fn connect(&self, autostart: Option<bool>) -> anyhow::Result<Client> {
+        match &self.on {
+            Some(machine) => {
+                let control = self.paths.socket.parent().unwrap_or(Path::new("."));
+                Ok(machines::connect(
+                    machine,
+                    control,
+                    autostart == Some(true),
+                )?)
+            }
+            None => connect(self.paths, self.dir, autostart),
+        }
+    }
 }
 
 /// `berth run`'s arguments.
@@ -252,20 +338,20 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         None => Paths::user()?,
     };
     let json = cli.json;
+    let server = Server::new(&paths, cli.dir.as_deref(), cli.on, &cli.command)?;
     match cli.command {
         Command::Hello => println!("berth {}", env!("CARGO_PKG_VERSION")),
         Command::Serve { detach, sample } => serve(&paths, cli.dir.as_deref(), detach, sample)?,
-        Command::Run(args) => run_terminal(&paths, cli.dir.as_deref(), json, args)?,
+        Command::Run(args) => run_terminal(&server, json, args)?,
         Command::Ls { labels } => {
             let params = LsParams {
                 labels: labels.into_iter().collect(),
             };
-            let list: Vec<TerminalInfo> = connect(&paths, None, None)?.call(Method::Ls, &params)?;
+            let list: Vec<TerminalInfo> = server.connect(None)?.call(Method::Ls, &params)?;
             print(json, &list, || table(&list))?;
         }
         Command::Get { name } => {
-            let info: TerminalInfo =
-                connect(&paths, None, None)?.call(Method::Get, &Target { name })?;
+            let info: TerminalInfo = server.connect(None)?.call(Method::Get, &Target { name })?;
             let pretty = serde_json::to_string_pretty(&info)?;
             print(json, &info, || format!("{pretty}\n"))?;
         }
@@ -280,7 +366,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 lines,
                 history,
             };
-            let read: ReadResult = connect(&paths, None, None)?.call(Method::Read, &params)?;
+            let read: ReadResult = server.connect(None)?.call(Method::Read, &params)?;
             print(json, &read, || {
                 if read.text.is_empty() {
                     String::new()
@@ -289,16 +375,16 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 }
             })?;
         }
-        Command::Send { name, text } => send(&paths, json, name, text)?,
+        Command::Send { name, text } => send(&server, json, name, text)?,
         Command::Approve { name, option } => {
             print(
                 json,
-                &to_acp(&paths, name, &Input::Approve(option))?,
+                &to_acp(&server, name, &Input::Approve(option))?,
                 String::new,
             )?;
         }
         Command::Cancel { name } => {
-            print(json, &to_acp(&paths, name, &Input::Cancel)?, String::new)?;
+            print(json, &to_acp(&server, name, &Input::Cancel)?, String::new)?;
         }
         Command::Agents { action } => agents_cmd(&paths, json, action)?,
         Command::AcpBridge {
@@ -308,34 +394,35 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             cmd,
         } => return bridge(&cmd, &socket, &state, &policy),
         Command::Keys { name, keys } => {
-            let done: Value =
-                connect(&paths, None, None)?.call(Method::Keys, &KeysParams { name, keys })?;
+            let done: Value = server
+                .connect(None)?
+                .call(Method::Keys, &KeysParams { name, keys })?;
             print(json, &done, String::new)?;
         }
         Command::Kill { name } => {
-            let info: TerminalInfo =
-                connect(&paths, None, None)?.call(Method::Kill, &Target { name })?;
+            let info: TerminalInfo = server.connect(None)?.call(Method::Kill, &Target { name })?;
             print(json, &info, || match info.exit {
                 Some(code) => format!("{} exited {code}\n", info.name),
                 None => format!("{} exited\n", info.name),
             })?;
         }
         Command::Rm { name } => {
-            let info: TerminalInfo =
-                connect(&paths, None, None)?.call(Method::Rm, &Target { name })?;
+            let info: TerminalInfo = server.connect(None)?.call(Method::Rm, &Target { name })?;
             print(json, &info, || format!("{} removed\n", info.name))?;
         }
-        Command::Attach { name } => attach::attach(connect(&paths, None, None)?, &name)?,
-        Command::State { args, note } => state(&paths, json, args, note)?,
-        Command::Wait(args) => return wait(&paths, json, args),
+        Command::Attach { name } => attach::attach(server.connect(None)?, &name)?,
+        Command::State { args, note } => state(&server, json, args, note)?,
+        Command::Wait(args) => return wait(&server, json, args),
         Command::Events { labels, since } => {
             let params = EventsParams {
                 labels: labels.into_iter().collect(),
                 since,
             };
-            events(connect(&paths, None, None)?, &params)?;
+            events(server.connect(None)?, &params)?;
         }
-        Command::Top => top(&paths, json)?,
+        Command::Top => top(&server, json)?,
+        Command::Connect { autostart } => relay(&paths, cli.dir.as_deref(), autostart)?,
+        Command::Machine(command) => machine(&paths, json, command)?,
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -352,31 +439,56 @@ fn serve(paths: &Paths, dir: Option<&Path>, detach: bool, sample: f64) -> anyhow
     berth_server::serve(paths, every).context("berth serve")
 }
 
-/// `berth run`: prints the new terminal's name.
-fn run_terminal(paths: &Paths, dir: Option<&Path>, json: bool, a: RunArgs) -> anyhow::Result<()> {
-    let here = std::env::current_dir().context("current directory")?;
-    let cmd = match &a.acp {
-        Some(id) => bridge_cmd(paths, id, &a.policy, a.cmd)?,
-        None => a.cmd,
+/// `berth run`; with `--on` the cwd must be given, as an absolute path on the machine.
+fn run_terminal(server: &Server, json: bool, args: RunArgs) -> anyhow::Result<()> {
+    let cwd = match (&server.on, args.cwd) {
+        (None, cwd) => {
+            let here = std::env::current_dir().context("current directory")?;
+            cwd.map_or_else(|| here.clone(), |d| here.join(d))
+        }
+        (Some(_), Some(d)) if d.is_absolute() => d,
+        (Some(m), _) => bail!("with --on, pass --cwd as an absolute path on {}", m.name),
+    };
+    let cmd = match (&args.acp, &server.on) {
+        (Some(_), Some(m)) => bail!(
+            "run --acp works on this machine only, not with --on {}",
+            m.name
+        ),
+        (Some(id), None) => bridge_cmd(server.paths, id, &args.policy, args.cmd)?,
+        (None, _) => args.cmd,
     };
     let params = RunParams {
-        name: a.name,
-        labels: a.labels.into_iter().collect(),
-        cwd: a.cwd.map_or_else(|| here.clone(), |d| here.join(d)),
-        keep: a.keep,
-        idle_after: a.idle_after,
+        name: args.name,
+        labels: args.labels.into_iter().collect(),
+        cwd,
+        keep: args.keep,
+        idle_after: args.idle_after,
         cmd,
-        acp: a.acp,
+        acp: args.acp,
     };
-    let mut client = connect(paths, dir, Some(a.autostart))?;
+    let mut client = server.connect(Some(args.autostart))?;
     let info: TerminalInfo = client.call(Method::Run, &params)?;
     print(json, &info, || format!("{}\n", info.name))
 }
 
+/// `berth connect [--autostart]`: the protocol over stdin/stdout.
+fn relay(paths: &Paths, dir: Option<&Path>, autostart: bool) -> anyhow::Result<()> {
+    if UnixStream::connect(&paths.socket).is_err() {
+        if !autostart {
+            bail!(
+                "no berth server on {}; start one with `berth serve --detach`",
+                paths.socket.display()
+            );
+        }
+        serve_detached(paths, dir, None)?;
+    }
+    berth_server::relay(&paths.socket).context("berth connect")
+}
+
 /// `berth send`: an ACP terminal gets a framed prompt, reported `working` first so `send; wait --until
 /// done` never sees the last turn.
-fn send(paths: &Paths, json: bool, name: String, text: String) -> anyhow::Result<()> {
-    let mut client = connect(paths, None, None)?;
+fn send(server: &Server, json: bool, name: String, text: String) -> anyhow::Result<()> {
+    let mut client = server.connect(None)?;
     let info: TerminalInfo = client.call(Method::Get, &Target { name: name.clone() })?;
     let text = if info.acp.is_some() {
         let report = Reported {
@@ -442,8 +554,8 @@ fn bridge_cmd(
 }
 
 /// Delivers `input` to an ACP terminal's bridge.
-fn to_acp(paths: &Paths, name: String, input: &Input) -> anyhow::Result<Value> {
-    let mut client = connect(paths, None, None)?;
+fn to_acp(server: &Server, name: String, input: &Input) -> anyhow::Result<Value> {
+    let mut client = server.connect(None)?;
     let info: TerminalInfo = client.call(Method::Get, &Target { name: name.clone() })?;
     if info.acp.is_none() {
         bail!("{name} is not an ACP terminal (berth run --acp)");
@@ -476,16 +588,17 @@ fn agents_cmd(paths: &Paths, json: bool, action: Option<AgentsCommand>) -> anyho
 }
 
 /// `berth top`: the terminals by memory, largest first.
-fn top(paths: &Paths, json: bool) -> anyhow::Result<()> {
-    let mut list: Vec<TerminalInfo> =
-        connect(paths, None, None)?.call(Method::Ls, &LsParams::default())?;
+fn top(server: &Server, json: bool) -> anyhow::Result<()> {
+    let mut list: Vec<TerminalInfo> = server
+        .connect(None)?
+        .call(Method::Ls, &LsParams::default())?;
     list.sort_by_key(|t| std::cmp::Reverse(t.resources.map(|r| r.rss_mb)));
     print(json, &list, || table(&list))
 }
 
 /// `berth state [<t>] <state>`: the terminal defaults to `$BERTH`.
 fn state(
-    paths: &Paths,
+    server: &Server,
     json: bool,
     mut args: Vec<String>,
     note: Option<String>,
@@ -500,19 +613,19 @@ fn state(
         name,
         report: Reported { state, note },
     };
-    let info: TerminalInfo = connect(paths, None, None)?.call(Method::State, &params)?;
+    let info: TerminalInfo = server.connect(None)?.call(Method::State, &params)?;
     print(json, &info, String::new)
 }
 
 /// `berth wait`: exit 0 on a match, 1 when the program exits, 124 on timeout.
-fn wait(paths: &Paths, json: bool, args: WaitArgs) -> anyhow::Result<ExitCode> {
+fn wait(server: &Server, json: bool, args: WaitArgs) -> anyhow::Result<ExitCode> {
     let params = WaitParams {
         name: args.name,
         until: args.until,
         output: args.output,
         timeout: args.timeout,
     };
-    let done: WaitResult = connect(paths, None, None)?.call(Method::Wait, &params)?;
+    let done: WaitResult = server.connect(None)?.call(Method::Wait, &params)?;
     let t = &done.terminal;
     let state = t.reported.as_ref().map(|r| &r.state);
     print(json, &done, || match (done.outcome, t.exit) {
@@ -541,6 +654,32 @@ fn events(mut client: Client, params: &EventsParams) -> anyhow::Result<()> {
         out.flush()?;
     }
     Ok(())
+}
+
+/// `berth machine add|ls|rm`.
+fn machine(paths: &Paths, json: bool, command: MachineCommand) -> anyhow::Result<()> {
+    match command {
+        MachineCommand::Add { name, target } => {
+            let m = machines::add(&paths.config, &name, &target)?;
+            print(json, &m, || format!("{} added\n", m.name))
+        }
+        MachineCommand::Ls => {
+            let list = machines::load(&paths.config)?;
+            print(json, &list, || {
+                let width = list.iter().map(|m| m.name.len()).max().unwrap_or(0).max(4);
+                let mut out = format!("{:<width$}  TARGET\n", "NAME");
+                for m in &list {
+                    // Writing to a String cannot fail.
+                    let _ = writeln!(out, "{:<width$}  {}", m.name, m.target);
+                }
+                out
+            })
+        }
+        MachineCommand::Rm { name } => {
+            let m = machines::remove(&paths.config, &name)?;
+            print(json, &m, || format!("{} removed\n", m.name))
+        }
+    }
 }
 
 /// Prints `value` as one JSON line with `--json`, else `text()`.

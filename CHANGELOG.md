@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Machines over SSH (M3): `berth machine add <name> <ssh-target>`, `ls` and `rm` (kept in `config.toml`
+  under `[machines]`), a global `--on <machine>` that runs the terminal commands (including `attach`,
+  `wait` and streaming `events`) on that machine through one `ssh <target> berth connect` (key login only:
+  `BatchMode=yes`, a 10 s connect timeout, `ControlMaster=auto` where ssh supports it), and `berth connect
+  [--autostart]`, which carries the protocol over stdin/stdout. A berth of another version on the machine
+  is refused with the exact `cargo install` command to match it. With `--on`, `run` needs an absolute
+  `--cwd`.
 - ACP client mode (M2c): `berth run --acp <agent> [--policy allow|deny|ask]` runs any Agent Client Protocol
   (v1) agent as a structured terminal. `send` is a prompt, `approve` answers permission requests (state
   `blocked`), `cancel` (or `keys <t> esc`) cancels the turn, the state is `working` then `done` with the stop
