@@ -57,6 +57,8 @@ fn zero_pids(s: &str) -> String {
 struct Transcript {
     dir: PathBuf,
     text: String,
+    /// The file under `tests/golden/`.
+    golden: &'static str,
 }
 
 impl Transcript {
@@ -71,14 +73,18 @@ impl Transcript {
         if !out.status.success() {
             let code = out.status.code().unwrap_or(-1);
             let err = String::from_utf8_lossy(&out.stderr);
+            let err = if err.is_empty() { "\n".into() } else { err };
             write!(text, "[exit {code}] {err}").expect("write to a String");
         }
-        self.text.push_str(&zero_pids(&text.replace(dir, "$DIR")));
+        let text = text.replace(BERTH, "berth").replace(dir, "$DIR");
+        self.text.push_str(&zero_pids(&text));
         out
     }
 
     fn check(&self) {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/cli.txt");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/golden")
+            .join(self.golden);
         if std::env::var_os("BERTH_BLESS").is_some() {
             std::fs::write(&path, &self.text).expect("write golden");
         }
@@ -113,6 +119,7 @@ fn help_lists_every_command() {
     let help = berth(&["--help"]);
     for cmd in [
         "hello", "serve", "run", "ls", "get", "read", "send", "keys", "kill", "rm", "attach",
+        "state", "wait",
     ] {
         assert!(
             help.contains(&format!("\n  {cmd} ")),
@@ -128,6 +135,7 @@ fn run_read_send_exit_ls_and_labels_match_the_golden() {
     let mut t = Transcript {
         dir: dir.clone(),
         text: String::new(),
+        golden: "cli.txt",
     };
     t.run(&["ls"]);
     t.run(&["run", "--cwd", d, "--", "true"]);
@@ -169,6 +177,110 @@ fn run_read_send_exit_ls_and_labels_match_the_golden() {
     t.run(&["keys", "rev", "enter"]);
     t.run(&["run", "--label", "nolabel", "--", "true"]);
     t.check();
+}
+
+#[test]
+fn a_fake_agent_reports_by_escape_and_berth_state_and_wait_returns_on_each() {
+    let dir = temp_dir("state");
+    let d = dir.to_str().expect("utf-8 dir");
+    let _server = Server::start(&dir);
+    let mut t = Transcript {
+        dir: dir.clone(),
+        text: String::new(),
+        golden: "state.txt",
+    };
+    // The agent reports `working` by escape, then `done` with `berth state` and no name ($BERTH).
+    let agent = format!(
+        "printf 'start\\033]7501;state=working;note=step 1\\007end\\n'; read x; \
+         '{BERTH}' --dir '{d}' state done --note 'all green'; read y"
+    );
+    t.run(&[
+        "run", "--name", "agent", "--cwd", d, "--", "sh", "-c", &agent,
+    ]);
+    t.run(&[
+        "wait",
+        "agent",
+        "--until",
+        "done",
+        "working",
+        "--timeout",
+        "10",
+    ]);
+    t.run(&["read", "agent"]);
+    t.run(&["read", "agent", "--history"]);
+    t.run(&["send", "agent", "\n"]);
+    t.run(&[
+        "--json",
+        "wait",
+        "agent",
+        "--until",
+        "done",
+        "--timeout",
+        "10",
+    ]);
+    t.run(&["wait", "agent", "--until", "blocked", "--timeout", "0.2"]);
+    t.run(&["state", "agent", "blocked", "--note", "needs review"]);
+    t.run(&["--json", "get", "agent"]);
+    t.run(&["state", "agent", "sleeping"]);
+    t.run(&["send", "agent", "\n"]);
+    t.run(&["wait", "agent", "--until", "working"]);
+    t.check();
+}
+
+#[test]
+fn wait_matches_output_by_pattern_and_falls_back_to_idle() {
+    let dir = temp_dir("wait-output");
+    let d = dir.to_str().expect("utf-8 dir");
+    let _server = Server::start(&dir);
+    let script = "sleep 0.3; echo 'ok 12 tests'; exec sleep 100";
+    stdout(&berth_in(
+        &dir,
+        &[
+            "run", "--name", "test", "--cwd", d, "--", "sh", "-c", script,
+        ],
+    ));
+    let started = Instant::now();
+    let out = berth_in(
+        &dir,
+        &[
+            "wait",
+            "test",
+            "--output",
+            "^ok \\d+ tests$",
+            "--timeout",
+            "10",
+        ],
+    );
+    assert_eq!(stdout(&out), "test output\n");
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    let idle = [
+        "run",
+        "--name",
+        "quiet",
+        "--idle-after",
+        "1",
+        "--cwd",
+        d,
+        "--",
+        "sleep",
+        "100",
+    ];
+    stdout(&berth_in(&dir, &idle));
+    let out = berth_in(
+        &dir,
+        &["wait", "quiet", "--until", "idle", "--timeout", "10"],
+    );
+    assert_eq!(stdout(&out), "quiet idle\n");
+    let out = berth_in(
+        &dir,
+        &["wait", "test", "--until", "idle", "--timeout", "1.2"],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(124),
+        "no fallback unless asked: {out:?}"
+    );
 }
 
 #[test]

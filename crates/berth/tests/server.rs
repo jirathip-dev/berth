@@ -168,8 +168,36 @@ fn run_ls_read_kill_over_the_socket_match_the_goldens() {
         &c.call(7, "keys", &json!({"name": "build", "keys": ["enter"]})),
     );
 
+    goldens.record(
+        "state",
+        &c.call(
+            16,
+            "state",
+            &json!({"name": "build", "state": "working", "note": "step 1"}),
+        ),
+    );
+    goldens.record(
+        "wait",
+        &c.call(
+            17,
+            "wait",
+            &json!({"name": "build", "until": ["working"], "timeout": 10}),
+        ),
+    );
+    goldens.record(
+        "wait",
+        &c.call(
+            18,
+            "wait",
+            &json!({"name": "build", "until": ["done"], "timeout": 0.1}),
+        ),
+    );
+
     for (id, method, params) in [
-        (8, "wait", json!({"name": "build"})),
+        (8, "events", json!({"name": "build"})),
+        (19, "state", json!({"name": "build", "state": "idle"})),
+        (20, "wait", json!({"name": "build"})),
+        (21, "wait", json!({"name": "build", "output": "[a"})),
         (9, "get", json!({"name": "nope"})),
         (10, "rm", json!({"name": "build"})),
         (11, "run", other.clone()),

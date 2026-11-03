@@ -225,11 +225,15 @@ pub enum Method {
     Resize,
     /// Take over a terminal: [`Target`] → [`TerminalInfo`], then the connection streams raw output.
     Attach,
+    /// Report a terminal's state: [`StateParams`] → [`TerminalInfo`].
+    State,
+    /// Block until a state or output matches: [`WaitParams`] → [`WaitResult`].
+    Wait,
 }
 
 impl Method {
     /// Every method, in documentation order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::Hello,
         Self::Run,
         Self::Ls,
@@ -241,6 +245,8 @@ impl Method {
         Self::Rm,
         Self::Resize,
         Self::Attach,
+        Self::State,
+        Self::Wait,
     ];
 
     /// The wire name.
@@ -258,6 +264,8 @@ impl Method {
             Self::Rm => "rm",
             Self::Resize => "resize",
             Self::Attach => "attach",
+            Self::State => "state",
+            Self::Wait => "wait",
         }
     }
 
@@ -296,6 +304,12 @@ impl Method {
             Self::Attach => {
                 "Take over the terminal. After the response the server writes a redraw (clear, then the screen text) and the program's raw output, and closes the connection when the program's PTY closes. The client sends only notifications from then on (`send`, `keys`, `resize`); detaching is closing the connection."
             }
+            Self::State => {
+                "Report the terminal's state (`working`, `blocked`, `done` or `error`) with an optional note; a program can also print `ESC ] 7501 ; state=<s>[;note=<n>] BEL`, which never reaches the screen."
+            }
+            Self::Wait => {
+                "Answer once the reported state is one of `until` (`idle` too, from the `idle_after` fallback) or a visible screen line matches the pattern `output` (`matched`), the program exits (`exited`) or `timeout` seconds pass (`timeout`). The server blocks; nothing polls."
+            }
         }
     }
 }
@@ -321,6 +335,9 @@ pub struct RunParams {
     /// Come back as a shell after a server restart.
     #[serde(default)]
     pub keep: bool,
+    /// Report `idle` after this many seconds without output, until the program reports a state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_after: Option<u64>,
     /// The program and its arguments.
     pub cmd: Vec<String>,
 }
@@ -389,6 +406,63 @@ pub struct ResizeParams {
     pub cols: u16,
 }
 
+/// `state` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateParams {
+    /// The terminal's name.
+    pub name: String,
+    /// The reported state and note.
+    #[serde(flatten)]
+    pub report: Reported,
+}
+
+/// A state a terminal's program reported.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reported {
+    /// `working`, `blocked`, `done` or `error`; `idle` from the `idle_after` fallback.
+    pub state: String,
+    /// A free-text note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// `wait` params.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaitParams {
+    /// The terminal's name.
+    pub name: String,
+    /// Reported states that end the wait.
+    #[serde(default)]
+    pub until: Vec<String>,
+    /// A pattern (`.`, `[…]`, `\d \w \s`, `* + ?`, `^ $`) that ends the wait when a screen line matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Give up after this many seconds; none waits for ever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<f64>,
+}
+
+/// How a `wait` ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WaitOutcome {
+    /// A state in `until` or the `output` pattern matched.
+    Matched,
+    /// The program exited first.
+    Exited,
+    /// The timeout passed first.
+    Timeout,
+}
+
+/// `wait` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitResult {
+    /// How the wait ended.
+    pub outcome: WaitOutcome,
+    /// The terminal at that moment.
+    pub terminal: TerminalInfo,
+}
+
 /// Whether a terminal's program runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -418,4 +492,10 @@ pub struct TerminalInfo {
     pub exit: Option<i32>,
     /// The program's pid while running.
     pub pid: Option<i32>,
+    /// The state the program last reported, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported: Option<Reported>,
+    /// The `idle` fallback's silence, in seconds, if on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_after: Option<u64>,
 }
