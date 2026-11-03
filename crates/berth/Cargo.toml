@@ -1,0 +1,16 @@
+[package]
+name = "berth"
+description = "Keeps coding-agent terminals alive, reads their screens and reports their state."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+berth-server.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "berth-proto"
+description = "berth's API types and JSON-RPC method list."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true

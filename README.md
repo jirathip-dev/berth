@@ -154,7 +154,7 @@ berth/
 
 ## Milestones
 
-0. **M0, the skeleton:** the workspace layout above, every CI gate green on an empty `hello` command, plus the PR template, LICENSE, SECURITY, CONTRIBUTING and justfile. Nothing else lands before M0.
+0. ✅ **M0, the skeleton:** the workspace layout above, every CI gate green on an empty `hello` command, plus the PR template, LICENSE, SECURITY, CONTRIBUTING and justfile. Nothing else lands before M0.
 1. **M1, local core:** `serve`, `run`, `ls`, `get`, `read`, `send`/`keys`, `kill`/`rm`, `attach`, process-tree cleanup,
    the socket API, persistence.
 2. **M2, state:** `state`, `wait`, `events`, OSC reporting, the per-terminal resource report.
