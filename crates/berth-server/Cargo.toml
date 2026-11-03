@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 berth-core.workspace = true
 berth-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [lints]
