@@ -121,7 +121,7 @@ fn help_lists_every_command() {
     let help = berth(&["--help"]);
     for cmd in [
         "hello", "serve", "run", "ls", "get", "read", "send", "keys", "kill", "rm", "attach",
-        "state", "wait", "events", "top",
+        "state", "wait", "events", "top", "connect", "machine",
     ] {
         assert!(
             help.contains(&format!("\n  {cmd} ")),

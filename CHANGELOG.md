@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Machines over SSH (M3): `berth machine add <name> <ssh-target>`, `ls` and `rm` (kept in `config.toml`
+  under `[machines]`), a global `--on <machine>` that runs the terminal commands (including `attach`,
+  `wait` and streaming `events`) on that machine through one `ssh <target> berth connect` (key login only:
+  `BatchMode=yes`, a 10 s connect timeout, `ControlMaster=auto` where ssh supports it), and `berth connect
+  [--autostart]`, which carries the protocol over stdin/stdout. A berth of another version on the machine
+  is refused with the exact `cargo install` command to match it. With `--on`, `run` needs an absolute
+  `--cwd`.
 - Events and resources (M2b): `berth events [--label k=v] [--since N]` streams `started`, `state`,
   `exited {code}`, `killed` and `resources {rss_mb, cpu_pct}` as JSON lines, each with a `seq`; `--since`
   replays from a ring of the last 1,000. `berth serve --sample S` (default 2) samples every process
