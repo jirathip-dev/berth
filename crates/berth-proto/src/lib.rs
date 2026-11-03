@@ -231,11 +231,13 @@ pub enum Method {
     Wait,
     /// Stream events: [`EventsParams`] → `{}`, then the connection streams [`Event`] lines.
     Events,
+    /// Emit an ACP terminal's structured event: [`EmitParams`] → `{}`.
+    Emit,
 }
 
 impl Method {
     /// Every method, in documentation order.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Hello,
         Self::Run,
         Self::Ls,
@@ -250,6 +252,7 @@ impl Method {
         Self::State,
         Self::Wait,
         Self::Events,
+        Self::Emit,
     ];
 
     /// The wire name.
@@ -270,6 +273,7 @@ impl Method {
             Self::State => "state",
             Self::Wait => "wait",
             Self::Events => "events",
+            Self::Emit => "emit",
         }
     }
 
@@ -317,6 +321,9 @@ impl Method {
             Self::Events => {
                 "Stream events. After the response the server writes one event per line (see Events) for the terminals carrying every one of `labels`, first those after `since` still in the ring of the last 1,000, and never closes the connection; closing it unsubscribes."
             }
+            Self::Emit => {
+                "Emit one of an ACP terminal's structured events (`turn`, `text`, `tool_call`, `plan`, `mode`, `approval_request`, `approved`, `reply`); its bridge (`berth run --acp`) calls this. Other events are refused."
+            }
         }
     }
 }
@@ -347,6 +354,9 @@ pub struct RunParams {
     pub idle_after: Option<u64>,
     /// The program and its arguments.
     pub cmd: Vec<String>,
+    /// The ACP agent the program bridges (`berth run --acp`): `read` renders its transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp: Option<String>,
 }
 
 /// `ls` params.
@@ -498,7 +508,7 @@ pub struct Event {
 
 /// What an [`Event`] reports; the `event` field names it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "event", rename_all = "lowercase")]
+#[serde(tag = "event", rename_all = "snake_case")]
 pub enum EventKind {
     /// The program started (`run`, or a kept terminal back after a server restart).
     Started,
@@ -513,6 +523,90 @@ pub enum EventKind {
     Killed,
     /// The tree's memory or CPU moved by more than 10 % since the last such event.
     Resources(Resources),
+    /// ACP: a prompt started a turn.
+    Turn {
+        /// The prompt text.
+        prompt: String,
+    },
+    /// ACP: a chunk of the agent's reply.
+    Text {
+        /// The chunk.
+        text: String,
+    },
+    /// ACP: a tool call started or changed.
+    ToolCall {
+        /// The agent's tool call id.
+        id: String,
+        /// What the tool does, in the agent's words.
+        title: String,
+        /// `pending`, `in_progress`, `completed` or `failed`.
+        status: String,
+    },
+    /// ACP: the agent's plan, as it sent it.
+    Plan {
+        /// The entries (`content`, `priority`, `status`).
+        entries: Vec<Value>,
+    },
+    /// ACP: the session's mode changed.
+    Mode {
+        /// The mode id.
+        mode: String,
+    },
+    /// ACP: the agent asks to run a tool; `berth approve` answers with one option.
+    ApprovalRequest {
+        /// The tool call's title.
+        tool: String,
+        /// The choices.
+        options: Vec<ApprovalOption>,
+    },
+    /// ACP: a permission request was answered (by `berth approve` or the `--policy`).
+    Approved {
+        /// The chosen option's id.
+        option: String,
+    },
+    /// ACP: the turn ended.
+    Reply {
+        /// The agent's whole reply text.
+        text: String,
+        /// Why it ended: `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` or `cancelled`.
+        stop_reason: String,
+    },
+}
+
+impl EventKind {
+    /// One of the ACP events `emit` takes.
+    #[must_use]
+    pub fn is_acp(&self) -> bool {
+        !matches!(
+            self,
+            Self::Started
+                | Self::State(_)
+                | Self::Exited { .. }
+                | Self::Killed
+                | Self::Resources(_)
+        )
+    }
+}
+
+/// One choice of an [`EventKind::ApprovalRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalOption {
+    /// The option id `berth approve` takes.
+    pub id: String,
+    /// Its label.
+    pub name: String,
+    /// `allow_once`, `allow_always`, `reject_once` or `reject_always`.
+    pub kind: String,
+}
+
+/// `emit` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmitParams {
+    /// The terminal's name.
+    pub name: String,
+    /// The event.
+    #[serde(flatten)]
+    pub kind: EventKind,
 }
 
 /// A terminal's process tree's resource use at the last sample.
@@ -562,4 +656,7 @@ pub struct TerminalInfo {
     /// The process tree's resource use at the last sample, while running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<Resources>,
+    /// The ACP agent the program bridges, for an ACP terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp: Option<String>,
 }

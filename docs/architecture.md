@@ -20,4 +20,5 @@ or the CLI; the server puts it behind a socket; the binary only parses arguments
 ```
 
 Arrows point at dependencies. `berth-core` depends on no other workspace crate; CI checks it
-(`just deps`). See [decisions/0001-workspace-layout.md](decisions/0001-workspace-layout.md).
+(`just deps`). See [decisions/0001-workspace-layout.md](decisions/0001-workspace-layout.md). ACP agents run
+through a bridge inside an ordinary terminal ([decisions/0003-acp-bridge.md](decisions/0003-acp-bridge.md)).
