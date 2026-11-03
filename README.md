@@ -68,21 +68,28 @@ protocol over stdin/stdout for SSH.
 - **Fast:** every CLI call that doesn't wait is < 20 ms locally.
 - **Public repo:** placeholders only in docs and tests, no setup-specific names.
 
-## Structured agents: ACP (idea, from Codync)
+## Two modes: terminals and ACP agents (agent-agnostic)
 
-Many agents speak the [Agent Client Protocol](https://agentclientprotocol.com) (ACP): prompts, tool calls, approvals and
-the final reply as JSON-RPC messages instead of screen text. [Codync](https://github.com/leepokai/Codync) drives 40+
-agents this way.
+berth runs every agent one of two ways, chosen per terminal:
 
-For berth that suggests a second kind of terminal: `berth run --acp -- <agent-acp-cmd>`. The program speaks ACP on
-stdio, and berth exposes it through the same API as structured events:
-- `berth events` streams `turn`, `tool_call`, `approval_request` and `reply`;
-- `berth send` becomes `session/prompt`;
-- `berth wait --until done` is exact.
+1. **Terminal mode** (`berth run -- claude …`): the agent's own TUI in a PTY, as herdr does today.
+   - You can `attach` and watch or type.
+   - State comes from the agent's hooks (`berth state`) or the OSC escape.
+   - Works with **any** program.
+2. **ACP mode** (`berth run --acp <agent>`): berth is an [Agent Client Protocol](https://agentclientprotocol.com) **client**.
+   - It starts the agent's ACP adapter on stdio, so there's no TUI.
+   - The agent's turns, tool calls, approval requests, plans and final replies arrive as **structured events**, not screen
+     text.
+   - `berth send` becomes `session/prompt`, `wait --until done` is exact, and approvals are answered through the API.
+   - **Any agent in the [ACP registry](https://agentclientprotocol.com/get-started/registry) works the same way:** Claude
+     Code, Codex, Gemini CLI, Pi, OpenCode, Copilot and the rest. That's what [Codync](https://github.com/leepokai/Codync)
+     does.
+   - `berth agents` lists the installed ones; `berth agents add <id>` installs from the registry (pinned version).
 
-The PTY mode stays for agents without ACP. This is an idea, not v0.1 scope. It needs a check of each agent's ACP
-adapter and its terms; e.g. Claude Code's adapter runs on the Agent SDK, so its subscription rules need confirming
-first.
+**Accounts:** berth never calls a model provider itself. Each agent uses its own login, e.g. Claude Code with your Claude
+plan, or Codex with your ChatGPT plan. Claude Code's ACP adapter is built on Anthropic's Agent SDK. The SDK runs on the
+plan today, but Anthropic hasn't promised that will last. Terminal mode with the real `claude` binary is the fallback that
+is always allowed.
 
 ## Integration with herdsman
 
