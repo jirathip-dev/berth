@@ -14,9 +14,14 @@ use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
+use berth_core::{Pattern, STATES, Wake};
 pub use berth_proto as proto;
-use proto::{ErrorCode, Hello, Method, Request, Response, RpcError, Target, VERSION};
+use proto::{
+    ErrorCode, Hello, Method, Request, Response, RpcError, Target, VERSION, WaitOutcome,
+    WaitParams, WaitResult,
+};
 use registry::{Attached, Registry};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -260,6 +265,9 @@ fn dispatch(
             .map_err(|e| RpcError::new(ErrorCode::Internal, e))?;
         return json(&lock(registry).killed(&name, &term, status)?);
     }
+    if method == Method::Wait {
+        return json(&wait(registry, &params(request)?)?);
+    }
     let mut reg = lock(registry);
     reg.refresh()?;
     match method {
@@ -282,8 +290,66 @@ fn dispatch(
             session.attach = Some(attached);
             json(&info)
         }
-        Method::Hello | Method::Kill => Err(RpcError::new(ErrorCode::Internal, "handled above")),
+        Method::State => json(&reg.state(params(request)?)?),
+        Method::Hello | Method::Kill | Method::Wait => {
+            Err(RpcError::new(ErrorCode::Internal, "handled above"))
+        }
     }
+}
+
+/// `wait`: blocks this connection, not the registry, until a state or output matches, the program
+/// exits or the timeout passes.
+fn wait(registry: &Mutex<Registry>, p: &WaitParams) -> Result<WaitResult, RpcError> {
+    let bad = |e: &dyn std::fmt::Display| RpcError::new(ErrorCode::InvalidParams, e);
+    if p.until.is_empty() && p.output.is_none() {
+        return Err(bad(&"give until, output or both"));
+    }
+    if let Some(s) = p
+        .until
+        .iter()
+        .find(|s| *s != "idle" && !STATES.contains(&s.as_str()))
+    {
+        return Err(bad(&format!("unknown state {s:?}")));
+    }
+    let pattern = p.output.as_deref().map(Pattern::new).transpose();
+    let pattern = pattern.map_err(|e| bad(&e))?;
+    let timeout = p.timeout.map(Duration::try_from_secs_f64).transpose();
+    // A timeout too far out to add to the clock waits for ever.
+    let deadline = timeout
+        .map_err(|e| bad(&e))?
+        .and_then(|d| Instant::now().checked_add(d));
+    let (term, info) = {
+        let mut reg = lock(registry);
+        reg.refresh()?;
+        reg.to_wait(&p.name)?
+    };
+    let reported = |state: &str| p.until.iter().any(|s| s == state);
+    let outcome = match term {
+        Some(term) => {
+            let done = |t: &berth_core::Terminal| {
+                t.report().is_some_and(|r| reported(&r.state))
+                    || pattern
+                        .as_ref()
+                        .is_some_and(|re| t.screen().lines().any(|l| re.is_match(l)))
+            };
+            match term
+                .wait_until(done, deadline)
+                .map_err(|e| RpcError::new(ErrorCode::Internal, e))?
+            {
+                Wake::Matched => WaitOutcome::Matched,
+                Wake::Exited => WaitOutcome::Exited,
+                Wake::Timeout => WaitOutcome::Timeout,
+            }
+        }
+        None if info.reported.is_some_and(|r| reported(&r.state)) => WaitOutcome::Matched,
+        None => WaitOutcome::Exited,
+    };
+    let mut reg = lock(registry);
+    reg.refresh()?;
+    Ok(WaitResult {
+        outcome,
+        terminal: reg.get(&p.name)?,
+    })
 }
 
 /// A connection to a server, past the version handshake.

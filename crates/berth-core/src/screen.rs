@@ -16,6 +16,18 @@ pub struct Size {
     pub cols: u16,
 }
 
+/// The states a program can report (`berth state`, or the OSC 7501 escape).
+pub const STATES: [&str; 4] = ["working", "blocked", "done", "error"];
+
+/// A state a program reported, with an optional note.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Report {
+    /// One of [`STATES`], or `idle` from the silence fallback.
+    pub state: String,
+    /// A free-text note.
+    pub note: Option<String>,
+}
+
 /// A VT screen: feed it the program's output and read back plain text.
 pub struct Screen {
     parser: Parser,
@@ -40,6 +52,12 @@ impl Screen {
     /// Takes the bytes the screen owes the program (answers to cursor and device queries).
     pub fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.grid.replies)
+    }
+
+    /// Takes the last state the program reported with `ESC ] 7501 ; state=<s>[;note=<n>] BEL` since the
+    /// previous call. The escape never reaches the screen.
+    pub fn take_report(&mut self) -> Option<Report> {
+        self.grid.report.take()
     }
 
     /// The visible screen as plain text: one line per row, trailing spaces and blank rows dropped.
@@ -104,6 +122,7 @@ struct Grid {
     /// The primary screen and cursor while the alternate screen is up.
     primary: Option<(Cells, (usize, usize))>,
     replies: Vec<u8>,
+    report: Option<Report>,
 }
 
 impl Grid {
@@ -123,6 +142,7 @@ impl Grid {
             limit,
             primary: None,
             replies: Vec::new(),
+            report: None,
         }
     }
 
@@ -401,6 +421,25 @@ impl Perform for Grid {
         }
     }
 
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        let [b"7501", fields @ ..] = params else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&fields.join(&b';')).into_owned();
+        let (state, note) = match text.split_once(";note=") {
+            Some((state, note)) => (state, Some(note.to_owned())),
+            None => (text.as_str(), None),
+        };
+        if let Some(state) = state.strip_prefix("state=")
+            && STATES.contains(&state)
+        {
+            self.report = Some(Report {
+                state: state.to_owned(),
+                note,
+            });
+        }
+    }
+
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
         if !intermediates.is_empty() {
             return;
@@ -415,8 +454,9 @@ impl Perform for Grid {
             }
             b'M' => self.reverse_index(),
             b'c' => {
-                let limit = self.limit;
+                let (limit, report) = (self.limit, self.report.take());
                 *self = Self::new(self.size(), limit);
+                self.report = report;
             }
             _ => {}
         }
@@ -475,6 +515,26 @@ mod tests {
         assert_eq!(s.text(), "c\nd");
         assert_eq!(s.history(10), "a\nb\nc\nd");
         assert_eq!(s.size(), Size { rows: 2, cols: 1 });
+    }
+
+    #[test]
+    fn osc_7501_reports_state_and_never_reaches_the_screen() {
+        let mut s = screen(3, 20, 0, "a\x1b]7501;state=working\x07b");
+        assert_eq!(s.text(), "ab");
+        let working = Report {
+            state: "working".into(),
+            note: None,
+        };
+        assert_eq!(s.take_report(), Some(working));
+        assert_eq!(s.take_report(), None);
+        s.feed(b"\x1b]7501;state=blocked;note=needs a; reply\x1b\\c");
+        s.feed(b"\x1b]7501;state=bogus\x07\x1b]2;title\x07");
+        assert_eq!(s.text(), "abc");
+        let blocked = Report {
+            state: "blocked".into(),
+            note: Some("needs a; reply".into()),
+        };
+        assert_eq!(s.take_report(), Some(blocked));
     }
 
     #[test]

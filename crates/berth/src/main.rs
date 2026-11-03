@@ -13,11 +13,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
 use berth_server::proto::{
-    KeysParams, LsParams, Method, ReadParams, ReadResult, RunParams, SendParams, State, Target,
-    TerminalInfo,
+    KeysParams, LsParams, Method, ReadParams, ReadResult, Reported, RunParams, SendParams, State,
+    StateParams, Target, TerminalInfo, WaitOutcome, WaitParams, WaitResult,
 };
 use berth_server::{Client, Paths};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -63,6 +63,9 @@ enum Command {
         /// Start `berth serve --detach` first when no server runs.
         #[arg(long)]
         autostart: bool,
+        /// Report `idle` after S seconds without output, until the program reports a state.
+        #[arg(long, value_name = "S")]
+        idle_after: Option<u64>,
         /// The program and its arguments.
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
@@ -122,6 +125,35 @@ enum Command {
         /// The terminal.
         name: String,
     },
+    /// Report a terminal's state: `berth state [<t>] working|blocked|done|error` (default `$BERTH`).
+    State {
+        /// The terminal, then the state; the terminal defaults to `$BERTH`, set inside every terminal.
+        #[arg(required = true, num_args = 1..=2, value_name = "[T] STATE")]
+        args: Vec<String>,
+        /// A free-text note.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Block until the reported state or the screen matches; exits 0 on a match, 1 when the program
+    /// exits, 124 on timeout.
+    Wait(WaitArgs),
+}
+
+/// `berth wait`'s arguments.
+#[derive(Args)]
+struct WaitArgs {
+    /// The terminal.
+    name: String,
+    /// States that end the wait.
+    #[arg(long, num_args = 1.., value_name = "STATE",
+          value_parser = ["working", "blocked", "done", "error", "idle"])]
+    until: Vec<String>,
+    /// A pattern (`.`, `[…]`, `\d \w \s`, `* + ?`, `^ $`) that ends the wait when a screen line matches.
+    #[arg(long, value_name = "RE")]
+    output: Option<String>,
+    /// Give up after S seconds.
+    #[arg(long, value_name = "S")]
+    timeout: Option<f64>,
 }
 
 fn label(s: &str) -> Result<(String, String), String> {
@@ -132,7 +164,7 @@ fn label(s: &str) -> Result<(String, String), String> {
 
 fn main() -> ExitCode {
     match run(Cli::parse()) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(e) => {
             eprintln!("berth: {e:#}");
             ExitCode::FAILURE
@@ -140,7 +172,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> anyhow::Result<()> {
+fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let paths = match &cli.dir {
         Some(dir) => Paths::in_dir(dir),
         None => Paths::user()?,
@@ -156,6 +188,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             cwd,
             keep,
             autostart,
+            idle_after,
             cmd,
         } => {
             let here = std::env::current_dir().context("current directory")?;
@@ -164,6 +197,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 labels: labels.into_iter().collect(),
                 cwd: cwd.map_or_else(|| here.clone(), |d| here.join(d)),
                 keep,
+                idle_after,
                 cmd,
             };
             let mut client = connect(&paths, cli.dir.as_deref(), Some(autostart))?;
@@ -227,8 +261,58 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             print(json, &info, || format!("{} removed\n", info.name))?;
         }
         Command::Attach { name } => attach::attach(connect(&paths, None, None)?, &name)?,
+        Command::State { args, note } => state(&paths, json, args, note)?,
+        Command::Wait(args) => return wait(&paths, json, args),
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `berth state [<t>] <state>`: the terminal defaults to `$BERTH`.
+fn state(
+    paths: &Paths,
+    json: bool,
+    mut args: Vec<String>,
+    note: Option<String>,
+) -> anyhow::Result<()> {
+    let state = args.pop().unwrap_or_default();
+    let name = match args.pop() {
+        Some(name) => name,
+        None => std::env::var("BERTH")
+            .context("no terminal given and $BERTH is unset (it is set inside a terminal)")?,
+    };
+    let params = StateParams {
+        name,
+        report: Reported { state, note },
+    };
+    let info: TerminalInfo = connect(paths, None, None)?.call(Method::State, &params)?;
+    print(json, &info, String::new)
+}
+
+/// `berth wait`: exit 0 on a match, 1 when the program exits, 124 on timeout.
+fn wait(paths: &Paths, json: bool, args: WaitArgs) -> anyhow::Result<ExitCode> {
+    let params = WaitParams {
+        name: args.name,
+        until: args.until,
+        output: args.output,
+        timeout: args.timeout,
+    };
+    let done: WaitResult = connect(paths, None, None)?.call(Method::Wait, &params)?;
+    let t = &done.terminal;
+    let state = t.reported.as_ref().map(|r| &r.state);
+    print(json, &done, || match (done.outcome, t.exit) {
+        (WaitOutcome::Matched, _) => match state.filter(|s| params.until.contains(s)) {
+            Some(state) => format!("{} {state}\n", t.name),
+            None => format!("{} output\n", t.name),
+        },
+        (WaitOutcome::Exited, Some(code)) => format!("{} exited {code}\n", t.name),
+        (WaitOutcome::Exited, None) => format!("{} exited\n", t.name),
+        (WaitOutcome::Timeout, _) => format!("{} timeout\n", t.name),
+    })?;
+    Ok(ExitCode::from(match done.outcome {
+        WaitOutcome::Matched => 0,
+        WaitOutcome::Exited => 1,
+        WaitOutcome::Timeout => 124,
+    }))
 }
 
 /// Prints `value` as one JSON line with `--json`, else `text()`.

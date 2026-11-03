@@ -6,8 +6,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use berth_proto::{
-    ErrorCode, Hello, KeysParams, LsParams, Method, ReadParams, ReadResult, Request, ResizeParams,
-    Response, RpcError, RunParams, SendParams, State, Target, TerminalInfo, VERSION,
+    ErrorCode, Hello, KeysParams, LsParams, Method, ReadParams, ReadResult, Reported, Request,
+    ResizeParams, Response, RpcError, RunParams, SendParams, State, StateParams, Target,
+    TerminalInfo, VERSION, WaitOutcome, WaitParams, WaitResult,
 };
 use serde_json::{Value, json, to_value};
 
@@ -21,6 +22,15 @@ fn info(state: State) -> TerminalInfo {
         state,
         exit: (state == State::Exited).then_some(0),
         pid: (state == State::Running).then_some(4242),
+        reported: None,
+        idle_after: None,
+    }
+}
+
+fn done() -> Reported {
+    Reported {
+        state: "done".into(),
+        note: Some("tests pass".into()),
     }
 }
 
@@ -49,6 +59,7 @@ fn example(method: Method) -> (Value, Value) {
                 labels: info(State::Running).labels,
                 cwd: PathBuf::from("/home/user/project"),
                 keep: true,
+                idle_after: None,
                 cmd: vec!["make".into(), "test".into()],
             })
             .unwrap(),
@@ -100,6 +111,35 @@ fn example(method: Method) -> (Value, Value) {
             json!({}),
         ),
         Method::Kill | Method::Rm => (target(), exited()),
+        Method::State => (
+            to_value(StateParams {
+                name: "build".into(),
+                report: done(),
+            })
+            .unwrap(),
+            to_value(TerminalInfo {
+                reported: Some(done()),
+                ..info(State::Running)
+            })
+            .unwrap(),
+        ),
+        Method::Wait => (
+            to_value(WaitParams {
+                name: "build".into(),
+                until: vec!["done".into(), "blocked".into()],
+                output: Some("^ok \\d+ tests$".into()),
+                timeout: Some(600.0),
+            })
+            .unwrap(),
+            to_value(WaitResult {
+                outcome: WaitOutcome::Matched,
+                terminal: TerminalInfo {
+                    reported: Some(done()),
+                    ..info(State::Running)
+                },
+            })
+            .unwrap(),
+        ),
     }
 }
 
@@ -119,7 +159,8 @@ fn markdown() -> String {
          version is refused with `BERTH_VERSION: client x, server y; restart the server`.\n\n\
          A terminal, as `run`, `ls`, `get`, `kill` and `rm` return it: `state` is `running` or `exited`; `exit` is\n\
          the exit status (128 + N for signal N), `null` while running or when the program was lost in a server\n\
-         restart; `pid` is set while running.\n\n## Methods\n"
+         restart; `pid` is set while running; `reported` is the state the program last reported (absent until\n\
+         then); `idle_after` is set when the `idle` fallback is on.\n\n## Methods\n"
     );
     for method in Method::ALL {
         let (params, result) = example(method);
@@ -164,7 +205,7 @@ fn method_names_round_trip() {
     for method in Method::ALL {
         assert_eq!(Method::parse(method.name()), Some(method));
     }
-    assert_eq!(Method::parse("wait"), None);
+    assert_eq!(Method::parse("events"), None);
 }
 
 #[test]

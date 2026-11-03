@@ -11,10 +11,10 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use berth_core::{Size, Terminal};
+use berth_core::{Report, STATES, Size, Terminal};
 use berth_proto::{
-    ErrorCode, KeysParams, LsParams, ReadParams, ReadResult, ResizeParams, RpcError, RunParams,
-    SendParams, State, TerminalInfo,
+    ErrorCode, KeysParams, LsParams, ReadParams, ReadResult, Reported, ResizeParams, RpcError,
+    RunParams, SendParams, State, StateParams, TerminalInfo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -59,8 +59,16 @@ fn exit_code(status: ExitStatus) -> Option<i32> {
     status.code().or_else(|| status.signal().map(|s| 128 + s))
 }
 
-fn spawn(cmd: &[String], cwd: &Path) -> Result<Terminal, berth_core::Error> {
-    Terminal::spawn(cmd, cwd, std::iter::empty::<(&str, &str)>(), SIZE)
+/// Starts `cmd` with `$BERTH` set to the terminal's name, so `berth state` inside needs no name.
+fn spawn(
+    cmd: &[String],
+    cwd: &Path,
+    name: &str,
+    idle_after: Option<u64>,
+) -> Result<Terminal, berth_core::Error> {
+    let term = Terminal::spawn(cmd, cwd, [("BERTH", name)], SIZE)?;
+    term.set_idle_after(idle_after.map(Duration::from_secs));
+    Ok(term)
 }
 
 fn valid_name(name: &str) -> bool {
@@ -89,7 +97,9 @@ impl Registry {
             if info.state == State::Running {
                 if info.keep {
                     let cmd = vec![shell.clone()];
-                    term = spawn(&cmd, &info.cwd).ok().map(Arc::new);
+                    term = spawn(&cmd, &info.cwd, &info.name, info.idle_after)
+                        .ok()
+                        .map(Arc::new);
                     if term.is_some() {
                         info.cmd = cmd;
                     }
@@ -139,14 +149,21 @@ impl Registry {
         Ok(value)
     }
 
-    /// Marks terminals whose program has exited, saving when any changed.
+    /// Copies each terminal's reported state and marks those whose program has exited, saving when
+    /// any changed.
     pub(crate) fn refresh(&mut self) -> Result<(), RpcError> {
         let mut changed = false;
         for entry in self.entries.values_mut() {
-            if entry.info.state != State::Running {
-                continue;
+            let Some(term) = &entry.term else { continue };
+            let reported = term.report().map(|r| Reported {
+                state: r.state,
+                note: r.note,
+            });
+            if entry.info.reported != reported {
+                entry.info.reported = reported;
+                changed = true;
             }
-            if let Some(term) = &entry.term
+            if entry.info.state == State::Running
                 && let Some(status) = term.try_wait().map_err(internal)?
             {
                 (entry.info.state, entry.info.exit) = (State::Exited, exit_code(status));
@@ -199,7 +216,7 @@ impl Registry {
                 .find(|n| !self.entries.contains_key(n))
                 .unwrap_or_default(),
         };
-        let term = spawn(&p.cmd, &p.cwd)
+        let term = spawn(&p.cmd, &p.cwd, &name, p.idle_after)
             .map_err(|e| RpcError::new(ErrorCode::SpawnFailed, format!("{name}: {e}")))?;
         let info = TerminalInfo {
             name: name.clone(),
@@ -210,6 +227,8 @@ impl Registry {
             state: State::Running,
             exit: None,
             pid: Some(term.pid()),
+            reported: None,
+            idle_after: p.idle_after,
         };
         self.entries.insert(
             name,
@@ -298,6 +317,32 @@ impl Registry {
         let output = term.subscribe();
         let redraw = format!("\x1b[H\x1b[2J{}", term.screen().replace('\n', "\r\n"));
         Ok((self.get(name)?, (redraw.into_bytes(), output)))
+    }
+
+    /// `state`: records a running terminal's reported state.
+    pub(crate) fn state(&mut self, p: StateParams) -> Result<TerminalInfo, RpcError> {
+        if !STATES.contains(&p.report.state.as_str()) {
+            return Err(RpcError::new(
+                ErrorCode::InvalidParams,
+                "state must be working, blocked, done or error",
+            ));
+        }
+        self.live(&p.name)?.set_report(Report {
+            state: p.report.state,
+            note: p.report.note,
+        });
+        self.refresh()?;
+        self.get(&p.name)
+    }
+
+    /// The terminal to wait on (`None` when lost in a restart) and its info; the caller waits without
+    /// holding the registry.
+    pub(crate) fn to_wait(
+        &self,
+        name: &str,
+    ) -> Result<(Option<Arc<Terminal>>, TerminalInfo), RpcError> {
+        let entry = self.entry(name)?;
+        Ok((entry.term.clone(), entry.info.clone()))
     }
 
     /// The terminal to kill, if it still runs; the caller kills it without holding the registry.

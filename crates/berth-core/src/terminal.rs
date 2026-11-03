@@ -5,17 +5,68 @@ use std::io::{Read as _, Write as _};
 use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, kill_process_group};
 
 use crate::proctree::{self, ProcessTable as _, Usage};
-use crate::screen::{Screen, Size};
+use crate::screen::{Report, Screen, Size};
 use crate::{Error, keys};
 
 /// Lines of scrollback each terminal keeps.
 pub const SCROLLBACK: usize = 10_000;
+/// How soon [`Terminal::wait_until`] looks again for the exit after the PTY closed but before the
+/// program was reaped.
+const REAP: Duration = Duration::from_millis(20);
+
+/// Why [`Terminal::wait_until`] returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wake {
+    /// The condition holds.
+    Matched,
+    /// The program exited first.
+    Exited,
+    /// The deadline passed first.
+    Timeout,
+}
+
+/// What waiters watch, shared with the reader thread.
+struct Status {
+    /// Bumped on every output chunk, report and PTY close.
+    changes: u64,
+    closed: bool,
+    last_output: Instant,
+    report: Option<Report>,
+    idle_after: Option<Duration>,
+}
+
+impl Status {
+    /// When the silence fallback reports `idle`: only while nothing was reported.
+    fn idle_at(&self) -> Option<Instant> {
+        match self.report {
+            Some(_) => None,
+            None => self
+                .idle_after
+                .and_then(|d| self.last_output.checked_add(d)),
+        }
+    }
+}
+
+struct Watch {
+    status: Mutex<Status>,
+    changed: Condvar,
+}
+
+impl Watch {
+    /// Applies `change` and wakes every waiter.
+    fn bump(&self, change: impl FnOnce(&mut Status)) {
+        let mut status = lock(&self.status);
+        change(&mut status);
+        status.changes += 1;
+        self.changed.notify_all();
+    }
+}
 
 /// A program running on a PTY, in its own session and process group.
 ///
@@ -25,6 +76,7 @@ pub struct Terminal {
     child: Mutex<Child>,
     screen: Arc<Mutex<Screen>>,
     outputs: Arc<Outputs>,
+    watch: Arc<Watch>,
     pid: i32,
 }
 
@@ -68,16 +120,29 @@ impl Terminal {
         let pty = Arc::new(pty);
         let screen = Arc::new(Mutex::new(Screen::new(size, SCROLLBACK)));
         let outputs = Arc::new(Mutex::new(Some(Vec::new())));
+        let watch = Arc::new(Watch {
+            status: Mutex::new(Status {
+                changes: 0,
+                closed: false,
+                last_output: Instant::now(),
+                report: None,
+                idle_after: None,
+            }),
+            changed: Condvar::new(),
+        });
         let (reader, sink, subs) = (Arc::clone(&pty), Arc::clone(&screen), Arc::clone(&outputs));
+        let watcher = Arc::clone(&watch);
         std::thread::spawn(move || {
-            read_loop(&reader, &sink, &subs);
+            read_loop(&reader, &sink, &subs, &watcher);
             *lock(&subs) = None;
+            watcher.bump(|s| s.closed = true);
         });
         Ok(Self {
             pty,
             child: Mutex::new(child),
             screen,
             outputs,
+            watch,
             pid,
         })
     }
@@ -98,6 +163,77 @@ impl Terminal {
     #[must_use]
     pub fn history(&self, n: usize) -> String {
         lock(&self.screen).history(n)
+    }
+
+    /// The state the program last reported (`berth state` or the OSC 7501 escape). Without one, `idle`
+    /// once the program has been silent for the [`set_idle_after`](Self::set_idle_after) time.
+    #[must_use]
+    pub fn report(&self) -> Option<Report> {
+        let status = lock(&self.watch.status);
+        let idle = status.idle_at().is_some_and(|at| Instant::now() >= at);
+        status.report.clone().or_else(|| {
+            idle.then(|| Report {
+                state: "idle".to_owned(),
+                note: None,
+            })
+        })
+    }
+
+    /// Records a reported state, as if the program had sent the escape.
+    pub fn set_report(&self, report: Report) {
+        self.watch.bump(|s| s.report = Some(report));
+    }
+
+    /// Turns the silence fallback on (`Some`) or off: [`report`](Self::report) says `idle` after this
+    /// long without output, until the program reports a state.
+    pub fn set_idle_after(&self, after: Option<Duration>) {
+        self.watch.bump(|s| s.idle_after = after);
+    }
+
+    /// Blocks until `done` holds, the program exits or `deadline` passes, checking `done` again on every
+    /// output chunk and report and when the idle fallback comes due (no polling).
+    ///
+    /// # Errors
+    /// [`Error::Io`] when the exit status cannot be read.
+    pub fn wait_until(
+        &self,
+        mut done: impl FnMut(&Self) -> bool,
+        deadline: Option<Instant>,
+    ) -> Result<Wake, Error> {
+        loop {
+            let seen = lock(&self.watch.status).changes;
+            if done(self) {
+                return Ok(Wake::Matched);
+            }
+            if self.try_wait()?.is_some() {
+                return Ok(Wake::Exited);
+            }
+            let mut status = lock(&self.watch.status);
+            let now = Instant::now();
+            if deadline.is_some_and(|d| now >= d) {
+                return Ok(Wake::Timeout);
+            }
+            let idle = status.idle_at().filter(|at| *at > now);
+            let reap = status.closed.then(|| now + REAP);
+            let wake = [deadline, idle, reap].into_iter().flatten().min();
+            while status.changes == seen {
+                let Some(at) = wake else {
+                    status = self
+                        .watch
+                        .changed
+                        .wait(status)
+                        .unwrap_or_else(PoisonError::into_inner);
+                    continue;
+                };
+                let Some(left) = at.checked_duration_since(Instant::now()) else {
+                    break;
+                };
+                status = match self.watch.changed.wait_timeout(status, left) {
+                    Ok((status, _)) => status,
+                    Err(e) => e.into_inner().0,
+                };
+            }
+        }
     }
 
     /// The program's raw output from now on, chunk by chunk; the channel closes when the PTY does.
@@ -189,17 +325,26 @@ fn pty_size(size: Size) -> pty_process::Size {
 
 /// Feeds PTY output into the screen and the subscribers until the PTY closes (EOF, or EIO once every
 /// program left).
-fn read_loop(pty: &pty_process::blocking::Pty, screen: &Mutex<Screen>, outputs: &Outputs) {
+fn read_loop(
+    pty: &pty_process::blocking::Pty,
+    screen: &Mutex<Screen>,
+    outputs: &Outputs,
+    watch: &Watch,
+) {
     let mut buf = [0u8; 8192];
     loop {
         match (&*pty).read(&mut buf) {
             Ok(0) => return,
             Ok(n) => {
-                let replies = {
+                let (replies, report) = {
                     let mut screen = lock(screen);
                     screen.feed(&buf[..n]);
-                    screen.take_replies()
+                    (screen.take_replies(), screen.take_report())
                 };
+                watch.bump(|s| {
+                    s.last_output = Instant::now();
+                    s.report = report.or_else(|| s.report.take());
+                });
                 if let Some(subs) = lock(outputs).as_mut() {
                     subs.retain(|tx| tx.send(buf[..n].to_vec()).is_ok());
                 }

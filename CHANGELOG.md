@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- State reporting and waiting (M2a): `berth state [<t>] working|blocked|done|error [--note]` (inside a
+  terminal `$BERTH` names it), the OSC escape `ESC ] 7501 ; state=<s>[;note=<n>] BEL` parsed from the
+  output and kept off the screen, `berth wait <t> --until <state>… [--output RE] [--timeout S]` that blocks
+  server-side and exits 0 on a match, 1 on exit and 124 on timeout, and `berth run --idle-after S` (report
+  `idle` after S silent seconds until the program reports). The protocol gains `state` and `wait`; a
+  terminal carries `reported` and `idle_after`.
 - The `berth` CLI (M1c): `run`, `ls`, `get`, `read`, `send`, `keys`, `kill`, `rm` and `attach` (raw mode,
   `Ctrl+\` detaches, window resizes forwarded) as a thin client, `--json` on every command, a global
   `--dir`, `berth serve --detach` and `berth run --autostart`. The protocol gains `resize` and `attach`.
