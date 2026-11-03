@@ -92,8 +92,69 @@ herdsman gets a `runtime = "herdr" | "berth"` setting (see herdsman's runtime sp
 - are read with `berth read`;
 - are watched with `berth events` instead of polling.
 
+## Engineering standards (from day one)
+
+### Repository layout
+
+```
+berth/
+├── crates/
+│   ├── berth-proto/    # the API types (serde) + JSON-RPC method list; the generated docs/protocol.md comes from here
+│   ├── berth-core/     # terminals, screen model (VT parser), state machine, persistence, process trees; no sockets
+│   ├── berth-server/   # the per-user server: socket, JSON-RPC, events stream, machines over SSH
+│   └── berth/          # the CLI binary (thin client + `berth serve`)
+├── tests/              # end-to-end: real PTYs, a fake agent that reports state
+├── docs/               # architecture.md, protocol.md, decisions/, cap-history/
+└── xtask/ or justfile  # `just check` runs every CI gate locally
+```
+
+- **Shipping:** one binary, with a library-first core. The binary crate holds only argument parsing and wiring.
+- **Dependency direction** is enforced in CI (a small `cargo metadata` check): `berth-core` never depends on the server or
+  CLI crates.
+- `docs/` holds `architecture.md` (one page, with a diagram), `protocol.md` (generated from the types), `decisions/`
+  (short ADRs, one per real choice) and `cap-history/`.
+
+### Code quality gates (CI blocks a merge on any failure)
+
+- **Formatting:** `cargo fmt --check`.
+- **Lints:** `cargo clippy --all-targets -- -D warnings` with `clippy::pedantic` on. Every `allow` carries a reason,
+  at most 10 in the workspace.
+- **No unsafe:** `#![forbid(unsafe_code)]` in every crate, except a single, reviewed PTY module
+  (berth) with a `// SAFETY:` note per block.
+- **Tests:** `cargo test --workspace` (unit tests next to the code; integration tests in `tests/`; golden files for every
+  protocol message and CLI output). New behaviour comes with a test that fails without it.
+- **Dependencies:** `cargo deny check` (licences: MIT/Apache/BSD/ISC only; advisories; no duplicate major versions) and
+  a lockfile committed; Dependabot weekly, grouped.
+- **Docs:** `cargo doc --no-deps -D warnings` (every public item documented).
+- **Size:** the line cap check (`≤ 5,000` non-test lines across `crates/*/src`), plus a soft per-PR line budget stated in
+  the PR.
+- **MSRV:** pinned in `rust-toolchain.toml` and the workspace `rust-version`; CI tests MSRV and stable.
+- **Platforms:** macOS (arm64) and Linux (x86_64, arm64) in the CI matrix.
+
+### Error handling and style
+
+- **Errors:** `thiserror` error enums in library crates, and `anyhow` only in the binary.
+- **No panics:** no `unwrap()`/`expect()` outside tests and proven invariants (each with a comment).
+- **No async by default:** add it only for a measured need, and write that down as an ADR.
+- **Logging:** structured logs with a level (`--log json|text`); secrets are never logged (redaction tested).
+- **Configuration:** one TOML file with a documented schema and defaults; unknown keys are an error with a hint.
+
+### Workflow
+
+- `main` is protected: changes land by PR with green CI and a review.
+- The PR template asks for: what changed, a `## For humans` section (2–4 plain lines), tests, the line count, and
+  "not verified".
+- No AI co-author or "generated with" trailers.
+- **Versioning:** SemVer, with a `CHANGELOG.md` (Keep a Changelog). Releases are tagged builds with checksums (GitHub
+  Actions); `cargo install` works from the repo.
+- **Repo files:** `LICENSE` (MIT OR Apache-2.0), `SECURITY.md` (private reporting), `CONTRIBUTING.md` (how to run the
+  gates locally: `just check`), and issue templates for bug and feature.
+- **Public-repo hygiene:** placeholders only in docs, tests and fixtures; a CI check bans setup-specific names; secret
+  scanning on push; secret-shaped test fixtures are built at runtime.
+
 ## Milestones
 
+0. **M0, the skeleton:** the workspace layout above, every CI gate green on an empty `hello` command, plus the PR template, LICENSE, SECURITY, CONTRIBUTING and justfile. Nothing else lands before M0.
 1. **M1, local core:** `serve`, `run`, `ls`, `get`, `read`, `send`/`keys`, `kill`/`rm`, `attach`, process-tree cleanup,
    the socket API, persistence.
 2. **M2, state:** `state`, `wait`, `events`, OSC reporting, the per-terminal resource report.
