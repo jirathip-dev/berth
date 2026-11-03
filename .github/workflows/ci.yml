@@ -1,0 +1,58 @@
+name: ci
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [main, staging]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Every gate on the MSRV toolchain (rust-toolchain.toml), on Linux and macOS.
+  msrv:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy, rustfmt
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-deny
+      - name: fmt
+        run: just fmt
+      - name: clippy (pedantic, at most 10 allows)
+        run: just clippy
+      - name: test
+        run: just test
+      - name: timing report (soft, < 20 ms per non-waiting call)
+        run: just bench
+      - name: doc
+        run: just doc
+      - name: deny (licences, advisories, duplicate versions)
+        run: just deny
+      - name: line cap (≤ 5,000 non-test lines in crates/*/src)
+        run: just cap
+      - name: dependency direction (berth-core has no workspace deps)
+        run: just deps
+      - name: public hygiene (ci/denylist.txt)
+        run: just hygiene
+
+  stable:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: test
+        run: cargo test --workspace --locked

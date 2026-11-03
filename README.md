@@ -58,7 +58,9 @@ around lanes:
 | `berth state <t> working\|blocked\|done\|error [--note TEXT]` | Report state (also via `$BERTH` + OSC 7501-compatible escape). |
 | `berth kill <t>` / `berth rm <t>` | End the process tree; remove a finished terminal. |
 | `berth attach <t>` | Take over the terminal interactively; `Ctrl+\` detaches. |
-| `berth events [--label k=v]` | Stream state changes and exits as JSON lines. |
+| `berth events [--label k=v] [--since N]` | Stream starts, state changes, exits, kills and resource moves as JSON lines; `--since` replays the last 1,000. |
+| `berth top` | The terminals by memory use, largest first. |
+| `berth run --acp <agent>`, `berth agents`, `berth approve`, `berth cancel` | ACP agents as structured terminals; see below. |
 | `berth --on <machine> …` / `berth machine add\|ls\|rm` | The same commands on another host over SSH (key login only). |
 
 **Persistence:** the server keeps PTYs alive while it runs. On server restart, kept terminals come back as shells in
@@ -84,28 +86,24 @@ protocol over stdin/stdout for SSH.
 - **Fast:** every CLI call that doesn't wait is < 20 ms locally.
 - **Public repo:** placeholders only in docs and tests, no setup-specific names.
 
-## Two modes: terminals and ACP agents (agent-agnostic)
+## Two modes: terminals and ACP agents
 
-berth runs every agent one of two ways, chosen per terminal:
+Many agents speak the [Agent Client Protocol](https://agentclientprotocol.com) (ACP): prompts, tool calls, approvals and
+the final reply as JSON-RPC messages instead of screen text (an idea from [Codync](https://github.com/leepokai/Codync)).
+berth runs them as a second kind of terminal, through the same API:
 
-1. **Terminal mode** (`berth run -- claude …`): the agent's own TUI in a PTY, as herdr does today.
-   - You can `attach` and watch or type.
-   - State comes from the agent's hooks (`berth state`) or the OSC escape.
-   - Works with **any** program.
-2. **ACP mode** (`berth run --acp <agent>`): berth is an [Agent Client Protocol](https://agentclientprotocol.com) **client**.
-   - It starts the agent's ACP adapter on stdio, so there's no TUI.
-   - The agent's turns, tool calls, approval requests, plans and final replies arrive as **structured events**, not screen
-     text.
-   - `berth send` becomes `session/prompt`, `wait --until done` is exact, and approvals are answered through the API.
-   - **Any agent in the [ACP registry](https://agentclientprotocol.com/get-started/registry) works the same way:** Claude
-     Code, Codex, Gemini CLI, Pi, OpenCode, Copilot and the rest. That's what [Codync](https://github.com/leepokai/Codync)
-     does.
-   - `berth agents` lists the installed ones; `berth agents add <id>` installs from the registry (pinned version).
+| Command | What it does |
+|---|---|
+| `berth agents` / `berth agents add <id>` / `berth agents rm <id>` | The installed ACP agents. `add` installs the version the [ACP registry](https://agentclientprotocol.com) lists now (its binary, `npx` or `uvx` entry), pinned; nothing upgrades it. |
+| `berth run --acp <id> [--policy allow\|deny\|ask] [--cwd D] [--label k=v…]` | Start the agent's ACP adapter on stdio: `initialize`, `session/new` (no MCP servers). |
+| `berth send <t> <text>` | `session/prompt`; the state is `working` until the turn ends, then `done` (note: the stop reason). |
+| `berth approve <t> <option>` | Answer a permission request (state `blocked`); `--policy` answers them instead. |
+| `berth cancel <t>` / `berth keys <t> esc` | `session/cancel`. |
+| `berth read <t>` | The transcript as text: prompts, one line per tool call, final replies. |
 
-**Accounts:** berth never calls a model provider itself. Each agent uses its own login, e.g. Claude Code with your Claude
-plan, or Codex with your ChatGPT plan. Claude Code's ACP adapter is built on Anthropic's Agent SDK. The SDK runs on the
-plan today, but Anthropic hasn't promised that will last. Terminal mode with the real `claude` binary is the fallback that
-is always allowed.
+`berth events` adds `turn`, `text`, `tool_call`, `plan`, `mode`, `approval_request`, `approved` and `reply`, and
+`berth wait --until done` is exact. The PTY mode stays for agents without ACP. berth never handles provider
+credentials: each agent logs in its own way. See [docs/acp.md](docs/acp.md), including the Claude adapter caveat.
 
 ## Integration with herdsman
 
@@ -177,7 +175,7 @@ berth/
 
 ## Milestones
 
-0. **M0, the skeleton:** the workspace layout above, every CI gate green on an empty `hello` command, plus the PR template, LICENSE, SECURITY, CONTRIBUTING and justfile. Nothing else lands before M0.
+0. ✅ **M0, the skeleton:** the workspace layout above, every CI gate green on an empty `hello` command, plus the PR template, LICENSE, SECURITY, CONTRIBUTING and justfile. Nothing else lands before M0.
 1. **M1, local core:** `serve`, `run`, `ls`, `get`, `read`, `send`/`keys`, `kill`/`rm`, `attach`, process-tree cleanup,
    the socket API, persistence.
 2. **M2, state:** `state`, `wait`, `events`, OSC reporting, the per-terminal resource report.
