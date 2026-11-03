@@ -30,6 +30,20 @@ around lanes:
 - **Process hygiene built in.** Closing a terminal ends its whole process tree. Per-terminal memory and CPU are
   reported, so a forgotten dev server or language server is visible.
 
+## Prior art (checked 2026-11-03)
+
+- **[herdr](https://github.com/herdrdev/herdr) / herdr-core:** full terminal multiplexers with agent detection from the
+  screen. berth's terminal mode is the small, headless, lane-shaped version.
+- **[acpx](https://github.com/openclaw/acpx)** (MIT, Node.js, pre-1.0): a headless ACP client CLI with persistent named
+  sessions, NDJSON events, permission policies and ~25 built-in adapters. It's the closest to berth's ACP mode. berth
+  differs in being one Rust binary (no Node), with terminals and ACP in one runtime, a per-user server that survives
+  restarts, other machines over SSH, and lane labels.
+- **[Codync](https://github.com/leepokai/Codync)'s `codync-host`** (Rust, large): a phone-bot platform with its own ACP
+  client and registry installer. It's not reusable as a runtime, but berth takes three lessons from it:
+  - treat registry JSON as untrusted input (ids, versions and commands become paths: validate them);
+  - keep ACP `session/update` payloads as raw JSON past the fields berth needs, so a newer adapter never breaks parsing;
+  - own the agent's whole process tree even after its leader exits.
+
 ## Scope (v0.1)
 
 | Command | What it does |
