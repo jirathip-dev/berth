@@ -9,14 +9,17 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use berth_core::proctree::{self, ProcessInfo};
 use berth_core::{Report, STATES, Size, Terminal};
 use berth_proto::{
-    ErrorCode, KeysParams, LsParams, ReadParams, ReadResult, Reported, ResizeParams, RpcError,
-    RunParams, SendParams, State, StateParams, TerminalInfo,
+    ErrorCode, EventKind, EventsParams, KeysParams, LsParams, ReadParams, ReadResult, Reported,
+    ResizeParams, Resources, RpcError, RunParams, SendParams, State, StateParams, TerminalInfo,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::events::Events;
 
 /// The size new terminals start at.
 const SIZE: Size = Size { rows: 24, cols: 80 };
@@ -25,8 +28,9 @@ pub(crate) const GRACE: Duration = Duration::from_secs(2);
 /// The state file's format version.
 const FILE_VERSION: u32 = 1;
 
-/// What `attach` streams: a redraw of the screen, then the raw output.
-pub(crate) type Attached = (Vec<u8>, Receiver<Vec<u8>>);
+/// What `attach` and `events` stream: a redraw of the screen or the replayed events, then the raw
+/// output or the event lines.
+pub(crate) type Stream = (Vec<u8>, Receiver<Vec<u8>>);
 
 /// The state file: every terminal's last known info.
 #[derive(Serialize, Deserialize)]
@@ -39,12 +43,41 @@ struct Entry {
     info: TerminalInfo,
     /// The live (or exited but still readable) terminal; `None` for one lost in a restart.
     term: Option<Arc<Terminal>>,
+    /// `kill` is ending it: its exit is a `killed` event, not `exited`.
+    killing: bool,
+    /// The tree's use at the last sample, and the use the last `resources` event reported.
+    resources: Option<Resources>,
+    emitted: Option<Resources>,
+    /// When the tree was last sampled and its CPU time then.
+    sampled: (Instant, Duration),
+}
+
+impl Entry {
+    fn new(info: TerminalInfo, term: Option<Arc<Terminal>>) -> Self {
+        Self {
+            info,
+            term,
+            killing: false,
+            resources: None,
+            emitted: None,
+            sampled: (Instant::now(), Duration::ZERO),
+        }
+    }
+
+    /// The info with the last sample, as `ls` and `get` show it.
+    fn view(&self) -> TerminalInfo {
+        TerminalInfo {
+            resources: self.resources,
+            ..self.info.clone()
+        }
+    }
 }
 
 /// The server's terminals by name, saved to `path` after every change.
 pub(crate) struct Registry {
     entries: BTreeMap<String, Entry>,
     path: PathBuf,
+    events: Events,
 }
 
 fn not_found(name: &str) -> RpcError {
@@ -53,6 +86,11 @@ fn not_found(name: &str) -> RpcError {
 
 fn internal(e: impl std::fmt::Display) -> RpcError {
     RpcError::new(ErrorCode::Internal, e)
+}
+
+/// More than 10 % away from the last reported value.
+fn moved(old: u64, new: u64) -> bool {
+    new.abs_diff(old) * 10 > old
 }
 
 fn exit_code(status: ExitStatus) -> Option<i32> {
@@ -92,6 +130,7 @@ impl Registry {
         };
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
         let mut entries = BTreeMap::new();
+        let mut events = Events::default();
         for mut info in file.terminals {
             let mut term = None;
             if info.state == State::Running {
@@ -109,11 +148,15 @@ impl Registry {
                 }
             }
             info.pid = term.as_ref().map(|t| t.pid());
-            entries.insert(info.name.clone(), Entry { info, term });
+            if term.is_some() {
+                events.emit(&info.name, &info.labels, EventKind::Started);
+            }
+            entries.insert(info.name.clone(), Entry::new(info, term));
         }
         let registry = Self {
             entries,
             path: path.to_owned(),
+            events,
         };
         registry.save()?;
         Ok(registry)
@@ -149,8 +192,8 @@ impl Registry {
         Ok(value)
     }
 
-    /// Copies each terminal's reported state and marks those whose program has exited, saving when
-    /// any changed.
+    /// Copies each terminal's reported state and marks those whose program has exited, emitting the
+    /// events and saving when any changed.
     pub(crate) fn refresh(&mut self) -> Result<(), RpcError> {
         let mut changed = false;
         for entry in self.entries.values_mut() {
@@ -160,14 +203,17 @@ impl Registry {
                 note: r.note,
             });
             if entry.info.reported != reported {
-                entry.info.reported = reported;
+                entry.info.reported.clone_from(&reported);
+                if let Some(r) = reported {
+                    let (name, labels) = (&entry.info.name, &entry.info.labels);
+                    self.events.emit(name, labels, EventKind::State(r));
+                }
                 changed = true;
             }
             if entry.info.state == State::Running
                 && let Some(status) = term.try_wait().map_err(internal)?
             {
-                (entry.info.state, entry.info.exit) = (State::Exited, exit_code(status));
-                entry.info.pid = None;
+                Self::exited(&mut self.events, entry, status);
                 changed = true;
             }
         }
@@ -175,6 +221,65 @@ impl Registry {
             self.save().map_err(internal)?;
         }
         Ok(())
+    }
+
+    /// Marks a running entry exited and emits `killed` or `exited`.
+    fn exited(events: &mut Events, entry: &mut Entry, status: ExitStatus) {
+        let code = exit_code(status);
+        (entry.info.state, entry.info.exit) = (State::Exited, code);
+        entry.info.pid = None;
+        entry.resources = None;
+        let kind = if entry.killing {
+            EventKind::Killed
+        } else {
+            EventKind::Exited { code }
+        };
+        events.emit(&entry.info.name, &entry.info.labels, kind);
+    }
+
+    /// Records each running tree's memory and CPU from `procs`, emitting `resources` when either moved
+    /// by more than 10 % since the last one.
+    pub(crate) fn sample(&mut self, procs: &[ProcessInfo], now: Instant) {
+        for entry in self.entries.values_mut() {
+            let Some(pid) = entry.info.pid else { continue };
+            let tree = proctree::tree(procs, pid, &std::collections::BTreeSet::new());
+            if tree.is_empty() {
+                continue;
+            }
+            let usage = proctree::usage(&tree);
+            let (then, cpu) = entry.sampled;
+            let wall = now.saturating_duration_since(then).as_micros().max(1);
+            let busy = usage.cpu.saturating_sub(cpu).as_micros();
+            entry.sampled = (now, usage.cpu);
+            let cpu_pct = u64::try_from((busy * 100 + wall / 2) / wall).unwrap_or(u64::MAX);
+            let now = Resources {
+                rss_mb: usage.rss_bytes / (1 << 20),
+                cpu_pct,
+            };
+            entry.resources = Some(now);
+            if entry
+                .emitted
+                .is_none_or(|old| moved(old.rss_mb, now.rss_mb) || moved(old.cpu_pct, now.cpu_pct))
+            {
+                entry.emitted = Some(now);
+                let (name, labels) = (&entry.info.name, &entry.info.labels);
+                self.events.emit(name, labels, EventKind::Resources(now));
+            }
+        }
+    }
+
+    /// `events`: the replay and the stream.
+    pub(crate) fn subscribe(&mut self, p: EventsParams) -> Stream {
+        self.events.subscribe(p)
+    }
+
+    /// The live terminals, to watch.
+    pub(crate) fn running(&self) -> Vec<Arc<Terminal>> {
+        self.entries
+            .values()
+            .filter(|e| e.info.state == State::Running)
+            .filter_map(|e| e.term.clone())
+            .collect()
     }
 
     fn entry(&self, name: &str) -> Result<&Entry, RpcError> {
@@ -229,14 +334,11 @@ impl Registry {
             pid: Some(term.pid()),
             reported: None,
             idle_after: p.idle_after,
+            resources: None,
         };
-        self.entries.insert(
-            name,
-            Entry {
-                info: info.clone(),
-                term: Some(Arc::new(term)),
-            },
-        );
+        self.events.emit(&name, &info.labels, EventKind::Started);
+        let entry = Entry::new(info.clone(), Some(Arc::new(term)));
+        self.entries.insert(name, entry);
         self.saved(info)
     }
 
@@ -249,13 +351,13 @@ impl Registry {
                     .iter()
                     .all(|(k, v)| e.info.labels.get(k) == Some(v))
             })
-            .map(|e| e.info.clone())
+            .map(Entry::view)
             .collect()
     }
 
     /// `get`: one terminal.
     pub(crate) fn get(&self, name: &str) -> Result<TerminalInfo, RpcError> {
-        Ok(self.entry(name)?.info.clone())
+        Ok(self.entry(name)?.view())
     }
 
     /// `read`: screen or history text; empty for a terminal lost in a restart.
@@ -312,7 +414,7 @@ impl Registry {
     }
 
     /// `attach`: a running terminal, a redraw of its screen, and its raw output from now on.
-    pub(crate) fn attach(&self, name: &str) -> Result<(TerminalInfo, Attached), RpcError> {
+    pub(crate) fn attach(&self, name: &str) -> Result<(TerminalInfo, Stream), RpcError> {
         let term = self.live(name)?;
         let output = term.subscribe();
         let redraw = format!("\x1b[H\x1b[2J{}", term.screen().replace('\n', "\r\n"));
@@ -345,13 +447,12 @@ impl Registry {
         Ok((entry.term.clone(), entry.info.clone()))
     }
 
-    /// The terminal to kill, if it still runs; the caller kills it without holding the registry.
-    pub(crate) fn to_kill(&self, name: &str) -> Result<Option<Arc<Terminal>>, RpcError> {
-        let entry = self.entry(name)?;
-        Ok(match entry.info.state {
-            State::Running => entry.term.clone(),
-            State::Exited => None,
-        })
+    /// The terminal to kill, if it still runs, marked so its exit is `killed`; the caller kills it
+    /// without holding the registry.
+    pub(crate) fn mark_kill(&mut self, name: &str) -> Result<Option<Arc<Terminal>>, RpcError> {
+        let entry = self.entries.get_mut(name).ok_or_else(|| not_found(name))?;
+        entry.killing = entry.info.state == State::Running;
+        Ok(entry.term.clone().filter(|_| entry.killing))
     }
 
     /// Records the exit of a terminal `kill` ended; returns its info.
@@ -362,11 +463,12 @@ impl Registry {
         status: ExitStatus,
     ) -> Result<TerminalInfo, RpcError> {
         let entry = self.entries.get_mut(name).ok_or_else(|| not_found(name))?;
-        if entry.term.as_ref().is_some_and(|t| Arc::ptr_eq(t, term)) {
-            (entry.info.state, entry.info.exit) = (State::Exited, exit_code(status));
-            entry.info.pid = None;
+        if entry.info.state == State::Running
+            && entry.term.as_ref().is_some_and(|t| Arc::ptr_eq(t, term))
+        {
+            Self::exited(&mut self.events, entry, status);
         }
-        let info = entry.info.clone();
+        let info = entry.view();
         self.saved(info)
     }
 

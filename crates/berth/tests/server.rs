@@ -50,6 +50,30 @@ impl Conn {
         (request, response, value)
     }
 
+    /// The next streamed line; at most ten seconds.
+    fn next(&mut self) -> String {
+        self.reader
+            .get_ref()
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .expect("timeout");
+        let mut line = String::new();
+        self.reader.read_line(&mut line).expect("an event line");
+        line.trim_end().to_owned()
+    }
+
+    /// The next streamed event, parsed.
+    fn event(&mut self) -> Value {
+        serde_json::from_str(&self.next()).expect("event is JSON")
+    }
+
+    /// A connection past `hello` streaming `events` with `params`.
+    fn events(dir: &Path, params: &Value) -> Self {
+        let mut c = Self::open(dir);
+        c.result("hello", &json!({"version": VERSION}));
+        assert_eq!(c.result("events", params), json!({}));
+        c
+    }
+
     fn result(&mut self, method: &str, params: &Value) -> Value {
         let (_, line, response) = self.call(0, method, params);
         response
@@ -109,6 +133,16 @@ impl Goldens {
             );
         }
     }
+}
+
+/// Records `events` from seq 0 and its four-event replay: two starts, a state and a kill.
+fn record_events(dir: &Path, goldens: &mut Goldens) {
+    let mut events = Conn::open(dir);
+    events.result("hello", &json!({"version": VERSION}));
+    let (request, response, _) = events.call(22, "events", &json!({"since": 0}));
+    let replay: Vec<String> = (0..4).map(|_| events.next()).collect();
+    let response = format!("{response}\n{}", replay.join("\n"));
+    goldens.record("events", &(request, response, Value::Null));
 }
 
 #[test]
@@ -194,7 +228,7 @@ fn run_ls_read_kill_over_the_socket_match_the_goldens() {
     );
 
     for (id, method, params) in [
-        (8, "events", json!({"name": "build"})),
+        (8, "nope", json!({"name": "build"})),
         (19, "state", json!({"name": "build", "state": "idle"})),
         (20, "wait", json!({"name": "build"})),
         (21, "wait", json!({"name": "build", "output": "[a"})),
@@ -216,6 +250,8 @@ fn run_ls_read_kill_over_the_socket_match_the_goldens() {
     goldens.record("rm", &rm);
     let left = c.result("ls", &json!({}));
     assert_eq!(left.as_array().map(Vec::len), Some(1));
+
+    record_events(&dir, &mut goldens);
     goldens.check();
 }
 
@@ -316,4 +352,75 @@ fn a_version_mismatch_is_refused() {
         after["error"]["code"], -32001,
         "a refused client stays refused"
     );
+}
+
+#[test]
+fn events_stream_in_seq_order_filter_by_label_and_replay_since() {
+    let dir = temp_dir("events");
+    let _server = Server::start(&dir);
+    let mut c = Conn::open(&dir);
+    c.result("hello", &json!({"version": VERSION}));
+    let mut live = Conn::events(&dir, &json!({"labels": {"test": "order"}}));
+
+    let script = "printf '\\033]7501;state=working\\007'; read x; exit 3";
+    let run = |name: &str, labels: Value, cmd: Value| json!({"name": name, "labels": labels, "cwd": dir, "cmd": cmd});
+    c.result("run", &run("other", json!({}), json!(["sleep", "100"])));
+    c.result(
+        "run",
+        &run("a", json!({"test": "order"}), json!(["sh", "-c", script])),
+    );
+    let started = live.event();
+    assert_eq!(
+        (&started["event"], &started["name"]),
+        (&json!("started"), &json!("a"))
+    );
+    assert_eq!(started["labels"], json!({"test": "order"}));
+    let state = live.event();
+    assert_eq!(
+        (&state["event"], &state["state"]),
+        (&json!("state"), &json!("working"))
+    );
+    c.result("send", &json!({"name": "a", "text": "\n"}));
+    let exited = live.event();
+    assert_eq!(
+        (&exited["event"], &exited["code"]),
+        (&json!("exited"), &json!(3))
+    );
+
+    c.result(
+        "run",
+        &run("b", json!({"test": "order"}), json!(["sleep", "100"])),
+    );
+    assert_eq!(live.event()["event"], "started");
+    c.result("kill", &json!({"name": "b"}));
+    let killed = live.event();
+    assert_eq!(
+        (&killed["event"], &killed["name"]),
+        (&json!("killed"), &json!("b"))
+    );
+
+    // `other` started first (seq 1) but is filtered out; the rest count up by one.
+    assert_eq!(started["seq"], 2);
+    assert_eq!(state["seq"], 3);
+    assert_eq!(exited["seq"], 4);
+    assert_eq!(killed["seq"], 6);
+
+    let mut all = Conn::events(&dir, &json!({"since": 0}));
+    let seqs: Vec<Value> = (0..6).map(|_| all.event()["seq"].clone()).collect();
+    assert_eq!(seqs, [1, 2, 3, 4, 5, 6].map(|n| json!(n)));
+    let mut since = Conn::events(&dir, &json!({"since": 3, "labels": {"test": "order"}}));
+    let replay: Vec<Value> = (0..3).map(|_| since.event()["seq"].clone()).collect();
+    assert_eq!(replay, [4, 5, 6].map(|n| json!(n)));
+
+    c.result(
+        "run",
+        &run("c", json!({"test": "order"}), json!(["sleep", "100"])),
+    );
+    for stream in [&mut since, &mut live, &mut all] {
+        assert_eq!(
+            stream.event()["seq"],
+            7,
+            "after the replay, the live stream"
+        );
+    }
 }

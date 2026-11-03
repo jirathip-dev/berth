@@ -4,7 +4,7 @@
 mod attach;
 
 use std::fmt::Write as _;
-use std::io;
+use std::io::{self, BufRead as _, Write as _};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
 use berth_server::proto::{
-    KeysParams, LsParams, Method, ReadParams, ReadResult, Reported, RunParams, SendParams, State,
-    StateParams, Target, TerminalInfo, WaitOutcome, WaitParams, WaitResult,
+    EventsParams, KeysParams, LsParams, Method, ReadParams, ReadResult, Reported, RunParams,
+    SendParams, State, StateParams, Target, TerminalInfo, WaitOutcome, WaitParams, WaitResult,
 };
 use berth_server::{Client, Paths};
 use clap::{Args, Parser, Subcommand};
@@ -45,6 +45,9 @@ enum Command {
         /// Start the server in the background and return once it answers.
         #[arg(long)]
         detach: bool,
+        /// Sample each terminal's memory and CPU every S seconds.
+        #[arg(long, value_name = "S", default_value_t = 2.0)]
+        sample: f64,
     },
     /// Start a terminal; prints its name.
     Run {
@@ -137,6 +140,17 @@ enum Command {
     /// Block until the reported state or the screen matches; exits 0 on a match, 1 when the program
     /// exits, 124 on timeout.
     Wait(WaitArgs),
+    /// Stream events as JSON lines: started, state, exited, killed and resources.
+    Events {
+        /// Only terminals carrying this label, `k=v`; repeatable.
+        #[arg(long = "label", value_name = "K=V", value_parser = label)]
+        labels: Vec<(String, String)>,
+        /// First replay the kept events (the last 1,000) after this `seq`.
+        #[arg(long, value_name = "N")]
+        since: Option<u64>,
+    },
+    /// List terminals by memory use, largest first.
+    Top,
 }
 
 /// `berth wait`'s arguments.
@@ -180,8 +194,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let json = cli.json;
     match cli.command {
         Command::Hello => println!("berth {}", env!("CARGO_PKG_VERSION")),
-        Command::Serve { detach: false } => berth_server::serve(&paths).context("berth serve")?,
-        Command::Serve { detach: true } => serve_detached(&paths, cli.dir.as_deref())?,
+        Command::Serve { detach, sample } => serve(&paths, cli.dir.as_deref(), detach, sample)?,
         Command::Run {
             name,
             labels,
@@ -263,8 +276,36 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Attach { name } => attach::attach(connect(&paths, None, None)?, &name)?,
         Command::State { args, note } => state(&paths, json, args, note)?,
         Command::Wait(args) => return wait(&paths, json, args),
+        Command::Events { labels, since } => {
+            let params = EventsParams {
+                labels: labels.into_iter().collect(),
+                since,
+            };
+            events(connect(&paths, None, None)?, &params)?;
+        }
+        Command::Top => top(&paths, json)?,
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `berth serve [--detach] [--sample S]`.
+fn serve(paths: &Paths, dir: Option<&Path>, detach: bool, sample: f64) -> anyhow::Result<()> {
+    if detach {
+        return serve_detached(paths, dir, Some(sample));
+    }
+    let every = Duration::try_from_secs_f64(sample)
+        .ok()
+        .filter(|d| !d.is_zero())
+        .context("--sample must be a positive number of seconds")?;
+    berth_server::serve(paths, every).context("berth serve")
+}
+
+/// `berth top`: the terminals by memory, largest first.
+fn top(paths: &Paths, json: bool) -> anyhow::Result<()> {
+    let mut list: Vec<TerminalInfo> =
+        connect(paths, None, None)?.call(Method::Ls, &LsParams::default())?;
+    list.sort_by_key(|t| std::cmp::Reverse(t.resources.map(|r| r.rss_mb)));
+    print(json, &list, || table(&list))
 }
 
 /// `berth state [<t>] <state>`: the terminal defaults to `$BERTH`.
@@ -315,6 +356,18 @@ fn wait(paths: &Paths, json: bool, args: WaitArgs) -> anyhow::Result<ExitCode> {
     }))
 }
 
+/// `berth events`: copies the event lines to stdout until the server closes the connection.
+fn events(mut client: Client, params: &EventsParams) -> anyhow::Result<()> {
+    let _: Value = client.call(Method::Events, params)?;
+    let (reader, _writer) = client.split();
+    let mut out = io::stdout().lock();
+    for line in reader.lines() {
+        writeln!(out, "{}", line?)?;
+        out.flush()?;
+    }
+    Ok(())
+}
+
 /// Prints `value` as one JSON line with `--json`, else `text()`.
 fn print<T: Serialize>(json: bool, value: &T, text: impl FnOnce() -> String) -> anyhow::Result<()> {
     if json {
@@ -336,7 +389,7 @@ fn connect(paths: &Paths, dir: Option<&Path>, autostart: Option<bool>) -> anyhow
             ) =>
         {
             if autostart == Some(true) {
-                serve_detached(paths, dir)?;
+                serve_detached(paths, dir, None)?;
                 return Ok(Client::connect(&paths.socket)?);
             }
             let hint = if autostart.is_some() {
@@ -355,7 +408,7 @@ fn connect(paths: &Paths, dir: Option<&Path>, autostart: Option<bool>) -> anyhow
 
 /// Starts `berth serve` in its own process group, detached from this terminal, and waits until it
 /// answers.
-fn serve_detached(paths: &Paths, dir: Option<&Path>) -> anyhow::Result<()> {
+fn serve_detached(paths: &Paths, dir: Option<&Path>, sample: Option<f64>) -> anyhow::Result<()> {
     if UnixStream::connect(&paths.socket).is_ok() {
         bail!("a berth server already runs on {}", paths.socket.display());
     }
@@ -363,6 +416,9 @@ fn serve_detached(paths: &Paths, dir: Option<&Path>) -> anyhow::Result<()> {
     cmd.arg("serve");
     if let Some(dir) = dir {
         cmd.arg("--dir").arg(dir);
+    }
+    if let Some(sample) = sample {
+        cmd.arg("--sample").arg(sample.to_string());
     }
     let mut child = cmd
         .process_group(0)
@@ -388,10 +444,15 @@ fn serve_detached(paths: &Paths, dir: Option<&Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `ls` as an aligned table: name, state, exit, pid, labels, command.
+/// `ls` and `top` as an aligned table: name, state, exit, pid, tree memory and CPU, labels, command.
 fn table(list: &[TerminalInfo]) -> String {
-    let dash = |v: Option<i32>| v.map_or_else(|| "-".to_owned(), |v| v.to_string());
-    let mut rows = vec![["NAME", "STATE", "EXIT", "PID", "LABELS", "CMD"].map(str::to_owned)];
+    let dash = |v: Option<String>| v.unwrap_or_else(|| "-".to_owned());
+    let mut rows = vec![
+        [
+            "NAME", "STATE", "EXIT", "PID", "RSS", "CPU", "LABELS", "CMD",
+        ]
+        .map(str::to_owned),
+    ];
     for t in list {
         let labels: Vec<String> = t.labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
         rows.push([
@@ -401,8 +462,10 @@ fn table(list: &[TerminalInfo]) -> String {
                 State::Exited => "exited",
             }
             .to_owned(),
-            dash(t.exit),
-            dash(t.pid),
+            dash(t.exit.map(|v| v.to_string())),
+            dash(t.pid.map(|v| v.to_string())),
+            dash(t.resources.map(|r| format!("{}M", r.rss_mb))),
+            dash(t.resources.map(|r| format!("{}%", r.cpu_pct))),
             if labels.is_empty() {
                 "-".to_owned()
             } else {
@@ -411,7 +474,7 @@ fn table(list: &[TerminalInfo]) -> String {
             t.cmd.join(" "),
         ]);
     }
-    let mut widths = [0; 6];
+    let mut widths = [0; 8];
     for row in &rows {
         for (w, cell) in widths.iter_mut().zip(row) {
             *w = cell.chars().count().max(*w);

@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Events and resources (M2b): `berth events [--label k=v] [--since N]` streams `started`, `state`,
+  `exited {code}`, `killed` and `resources {rss_mb, cpu_pct}` as JSON lines, each with a `seq`; `--since`
+  replays from a ring of the last 1,000. `berth serve --sample S` (default 2) samples every process
+  tree's memory and CPU; `resources` fires when either moves by more than 10 %. `ls` gains RSS and CPU
+  columns, `get` a `resources` field, and `berth top` lists terminals by memory. The protocol gains
+  `events`.
 - State reporting and waiting (M2a): `berth state [<t>] working|blocked|done|error [--note]` (inside a
   terminal `$BERTH` names it), the OSC escape `ESC ] 7501 ; state=<s>[;note=<n>] BEL` parsed from the
   output and kept off the screen, `berth wait <t> --until <state>… [--output RE] [--timeout S]` that blocks

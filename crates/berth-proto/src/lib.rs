@@ -229,11 +229,13 @@ pub enum Method {
     State,
     /// Block until a state or output matches: [`WaitParams`] → [`WaitResult`].
     Wait,
+    /// Stream events: [`EventsParams`] → `{}`, then the connection streams [`Event`] lines.
+    Events,
 }
 
 impl Method {
     /// Every method, in documentation order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Hello,
         Self::Run,
         Self::Ls,
@@ -247,6 +249,7 @@ impl Method {
         Self::Attach,
         Self::State,
         Self::Wait,
+        Self::Events,
     ];
 
     /// The wire name.
@@ -266,6 +269,7 @@ impl Method {
             Self::Attach => "attach",
             Self::State => "state",
             Self::Wait => "wait",
+            Self::Events => "events",
         }
     }
 
@@ -309,6 +313,9 @@ impl Method {
             }
             Self::Wait => {
                 "Answer once the reported state is one of `until` (`idle` too, from the `idle_after` fallback) or a visible screen line matches the pattern `output` (`matched`), the program exits (`exited`) or `timeout` seconds pass (`timeout`). The server blocks; nothing polls."
+            }
+            Self::Events => {
+                "Stream events. After the response the server writes one event per line (see Events) for the terminals carrying every one of `labels`, first those after `since` still in the ring of the last 1,000, and never closes the connection; closing it unsubscribes."
             }
         }
     }
@@ -463,6 +470,60 @@ pub struct WaitResult {
     pub terminal: TerminalInfo,
 }
 
+/// `events` params.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventsParams {
+    /// Only events of terminals carrying every one of these labels.
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    /// Replay the kept events whose `seq` is above this one first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+}
+
+/// One event, as `events` streams it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Event {
+    /// Counts up from 1 for every event the server emits, so a reconnecting client can ask for what it
+    /// missed with `since`.
+    pub seq: u64,
+    /// The terminal's name.
+    pub name: String,
+    /// The terminal's labels.
+    pub labels: BTreeMap<String, String>,
+    /// What happened.
+    #[serde(flatten)]
+    pub kind: EventKind,
+}
+
+/// What an [`Event`] reports; the `event` field names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "lowercase")]
+pub enum EventKind {
+    /// The program started (`run`, or a kept terminal back after a server restart).
+    Started,
+    /// The reported state changed.
+    State(Reported),
+    /// The program exited by itself.
+    Exited {
+        /// The exit status (128 + N for signal N).
+        code: Option<i32>,
+    },
+    /// `kill` ended the process tree.
+    Killed,
+    /// The tree's memory or CPU moved by more than 10 % since the last such event.
+    Resources(Resources),
+}
+
+/// A terminal's process tree's resource use at the last sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resources {
+    /// Summed resident memory, in MiB.
+    pub rss_mb: u64,
+    /// CPU use since the previous sample, in percent of one core.
+    pub cpu_pct: u64,
+}
+
 /// Whether a terminal's program runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -498,4 +559,7 @@ pub struct TerminalInfo {
     /// The `idle` fallback's silence, in seconds, if on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_after: Option<u64>,
+    /// The process tree's resource use at the last sample, while running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<Resources>,
 }

@@ -28,9 +28,15 @@ pub fn eventually(what: &str, mut check: impl FnMut() -> bool) {
 pub struct Server(Child);
 
 impl Server {
+    /// A server that samples resources once an hour, so no sample lands in a golden.
     pub fn start(dir: &Path) -> Self {
+        Self::sampling(dir, "3600")
+    }
+
+    /// A server that samples resources every `secs` seconds.
+    pub fn sampling(dir: &Path, secs: &str) -> Self {
         let child = Command::new(env!("CARGO_BIN_EXE_berth"))
-            .args(["serve", "--dir"])
+            .args(["serve", "--sample", secs, "--dir"])
             .arg(dir)
             .env("SHELL", "/bin/sh")
             .env("PS1", "$ ")

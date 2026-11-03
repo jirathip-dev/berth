@@ -44,7 +44,8 @@ around lanes:
 | `berth state <t> working\|blocked\|done\|error [--note TEXT]` | Report state (also via `$BERTH` + OSC 7501-compatible escape). |
 | `berth kill <t>` / `berth rm <t>` | End the process tree; remove a finished terminal. |
 | `berth attach <t>` | Take over the terminal interactively; `Ctrl+\` detaches. |
-| `berth events [--label k=v]` | Stream state changes and exits as JSON lines. |
+| `berth events [--label k=v] [--since N]` | Stream starts, state changes, exits, kills and resource moves as JSON lines; `--since` replays the last 1,000. |
+| `berth top` | The terminals by memory use, largest first. |
 | `berth --on <machine> …` / `berth machine add\|ls\|rm` | The same commands on another host over SSH (key login only). |
 
 **Persistence:** the server keeps PTYs alive while it runs. On server restart, kept terminals come back as shells in

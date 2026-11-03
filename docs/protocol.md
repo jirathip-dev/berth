@@ -14,7 +14,8 @@ version is refused with `BERTH_VERSION: client x, server y; restart the server`.
 A terminal, as `run`, `ls`, `get`, `kill` and `rm` return it: `state` is `running` or `exited`; `exit` is
 the exit status (128 + N for signal N), `null` while running or when the program was lost in a server
 restart; `pid` is set while running; `reported` is the state the program last reported (absent until
-then); `idle_after` is set when the `idle` fallback is on.
+then); `idle_after` is set when the `idle` fallback is on; `resources` is the process tree's memory
+(MiB) and CPU (percent of one core) at the last sample, while running.
 
 ## Methods
 
@@ -33,7 +34,7 @@ Start a terminal. `name` defaults to the first free `tN`; `keep` brings it back 
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"run","params":{"cmd":["make","test"],"cwd":"/home/user/project","keep":true,"labels":{"issue":"7","role":"impl"},"name":"build"}}
-{"jsonrpc":"2.0","id":1,"result":{"cmd":["make","test"],"cwd":"/home/user/project","exit":null,"keep":true,"labels":{"issue":"7","role":"impl"},"name":"build","pid":4242,"state":"running"}}
+{"jsonrpc":"2.0","id":1,"result":{"cmd":["make","test"],"cwd":"/home/user/project","exit":null,"keep":true,"labels":{"issue":"7","role":"impl"},"name":"build","pid":4242,"resources":{"cpu_pct":3,"rss_mb":52},"state":"running"}}
 ```
 
 ### `ls`
@@ -42,7 +43,7 @@ List terminals, by name; `labels` keeps those that carry every given label.
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"ls","params":{"labels":{"issue":"7"}}}
-{"jsonrpc":"2.0","id":1,"result":[{"cmd":["make","test"],"cwd":"/home/user/project","exit":null,"keep":true,"labels":{"issue":"7","role":"impl"},"name":"build","pid":4242,"state":"running"}]}
+{"jsonrpc":"2.0","id":1,"result":[{"cmd":["make","test"],"cwd":"/home/user/project","exit":null,"keep":true,"labels":{"issue":"7","role":"impl"},"name":"build","pid":4242,"resources":{"cpu_pct":3,"rss_mb":52},"state":"running"}]}
 ```
 
 ### `get`
@@ -51,7 +52,7 @@ One terminal.
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"get","params":{"name":"build"}}
-{"jsonrpc":"2.0","id":1,"result":{"cmd":["make","test"],"cwd":"/home/user/project","exit":null,"keep":true,"labels":{"issue":"7","role":"impl"},"name":"build","pid":4242,"state":"running"}}
+{"jsonrpc":"2.0","id":1,"result":{"cmd":["make","test"],"cwd":"/home/user/project","exit":null,"keep":true,"labels":{"issue":"7","role":"impl"},"name":"build","pid":4242,"resources":{"cpu_pct":3,"rss_mb":52},"state":"running"}}
 ```
 
 ### `read`
@@ -114,7 +115,7 @@ Take over the terminal. After the response the server writes a redraw (clear, th
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"attach","params":{"name":"build"}}
-{"jsonrpc":"2.0","id":1,"result":{"cmd":["make","test"],"cwd":"/home/user/project","exit":null,"keep":true,"labels":{"issue":"7","role":"impl"},"name":"build","pid":4242,"state":"running"}}
+{"jsonrpc":"2.0","id":1,"result":{"cmd":["make","test"],"cwd":"/home/user/project","exit":null,"keep":true,"labels":{"issue":"7","role":"impl"},"name":"build","pid":4242,"resources":{"cpu_pct":3,"rss_mb":52},"state":"running"}}
 ```
 
 ### `state`
@@ -123,7 +124,7 @@ Report the terminal's state (`working`, `blocked`, `done` or `error`) with an op
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"state","params":{"name":"build","note":"tests pass","state":"done"}}
-{"jsonrpc":"2.0","id":1,"result":{"cmd":["make","test"],"cwd":"/home/user/project","exit":null,"keep":true,"labels":{"issue":"7","role":"impl"},"name":"build","pid":4242,"reported":{"note":"tests pass","state":"done"},"state":"running"}}
+{"jsonrpc":"2.0","id":1,"result":{"cmd":["make","test"],"cwd":"/home/user/project","exit":null,"keep":true,"labels":{"issue":"7","role":"impl"},"name":"build","pid":4242,"reported":{"note":"tests pass","state":"done"},"resources":{"cpu_pct":3,"rss_mb":52},"state":"running"}}
 ```
 
 ### `wait`
@@ -132,7 +133,28 @@ Answer once the reported state is one of `until` (`idle` too, from the `idle_aft
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"wait","params":{"name":"build","output":"^ok \\d+ tests$","timeout":600.0,"until":["done","blocked"]}}
-{"jsonrpc":"2.0","id":1,"result":{"outcome":"matched","terminal":{"cmd":["make","test"],"cwd":"/home/user/project","exit":null,"keep":true,"labels":{"issue":"7","role":"impl"},"name":"build","pid":4242,"reported":{"note":"tests pass","state":"done"},"state":"running"}}}
+{"jsonrpc":"2.0","id":1,"result":{"outcome":"matched","terminal":{"cmd":["make","test"],"cwd":"/home/user/project","exit":null,"keep":true,"labels":{"issue":"7","role":"impl"},"name":"build","pid":4242,"reported":{"note":"tests pass","state":"done"},"resources":{"cpu_pct":3,"rss_mb":52},"state":"running"}}}
+```
+
+### `events`
+
+Stream events. After the response the server writes one event per line (see Events) for the terminals carrying every one of `labels`, first those after `since` still in the ring of the last 1,000, and never closes the connection; closing it unsubscribes.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"events","params":{"labels":{"issue":"7"},"since":120}}
+{"jsonrpc":"2.0","id":1,"result":{}}
+```
+
+## Events
+
+An event names its terminal, carries its labels and counts up in `seq`; `event` is `started`, `state` (the reported state changed), `exited` (by itself, with its `code`), `killed` (by `kill`) or `resources` (memory or CPU moved by more than 10 % since the last one).
+
+```json
+{"seq":1,"name":"build","labels":{"issue":"7","role":"impl"},"event":"started"}
+{"seq":2,"name":"build","labels":{"issue":"7","role":"impl"},"event":"state","state":"done","note":"tests pass"}
+{"seq":3,"name":"build","labels":{"issue":"7","role":"impl"},"event":"resources","rss_mb":52,"cpu_pct":3}
+{"seq":4,"name":"build","labels":{"issue":"7","role":"impl"},"event":"exited","code":0}
+{"seq":5,"name":"build","labels":{"issue":"7","role":"impl"},"event":"killed"}
 ```
 
 ## Errors

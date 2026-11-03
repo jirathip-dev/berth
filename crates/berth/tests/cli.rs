@@ -6,12 +6,14 @@
 mod common;
 
 use std::fmt::Write as _;
+use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use berth_core::{Size, Terminal};
 use common::{Server, eventually, temp_dir};
+use serde_json::{Value, json};
 
 const BERTH: &str = env!("CARGO_BIN_EXE_berth");
 
@@ -119,7 +121,7 @@ fn help_lists_every_command() {
     let help = berth(&["--help"]);
     for cmd in [
         "hello", "serve", "run", "ls", "get", "read", "send", "keys", "kill", "rm", "attach",
-        "state", "wait",
+        "state", "wait", "events", "top",
     ] {
         assert!(
             help.contains(&format!("\n  {cmd} ")),
@@ -171,6 +173,7 @@ fn run_read_send_exit_ls_and_labels_match_the_golden() {
     t.run(&["--json", "ls", "--label", "role=rev"]);
     t.run(&["get", "shell"]);
     t.run(&["--json", "get", "shell"]);
+    t.run(&["top"]);
     t.run(&["rm", "shell"]);
     t.run(&["--json", "rm", "rev"]);
     t.run(&["ls"]);
@@ -382,6 +385,59 @@ fn run_autostart_starts_a_detached_server() {
         killed.success(),
         "the server ({server}) is the program's parent"
     );
+}
+
+#[test]
+fn a_child_allocating_50_mb_fires_a_resources_event_and_tops_the_list() {
+    let dir = temp_dir("resources");
+    let d = dir.to_str().expect("utf-8 dir");
+    let _server = Server::sampling(&dir, "0.2");
+    let mut events = Command::new(BERTH)
+        .args(["--dir", d, "events", "--label", "test=mem"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("berth events");
+    let mut lines = BufReader::new(events.stdout.take().expect("stdout")).lines();
+    let mut next = || -> Value {
+        let line = lines.next().expect("an event").expect("a line");
+        serde_json::from_str(&line).expect("event is JSON")
+    };
+    stdout(&berth_in(
+        &dir,
+        &["run", "--name", "small", "--cwd", d, "--", "sleep", "100"],
+    ));
+    // The shell child holds 50 MiB of `x`s; the tree's leader is the outer `sh`.
+    let script = r#"sh -c 'x=$(head -c 52428800 /dev/zero | tr "\0" x); sleep 100'"#;
+    let run = ["run", "--name", "mem", "--label", "test=mem", "--cwd", d];
+    stdout(&berth_in(
+        &dir,
+        &[&run[..], &["--", "sh", "-c", script]].concat(),
+    ));
+    assert_eq!(next()["event"], "started");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(Instant::now() < deadline, "no 50 MB resources event");
+        let event = next();
+        assert_eq!(
+            (&event["name"], &event["event"]),
+            (&json!("mem"), &json!("resources"))
+        );
+        if event["rss_mb"].as_u64().expect("rss_mb") >= 50 {
+            break;
+        }
+    }
+    let _ = events.kill();
+    let _ = events.wait();
+
+    let get: Value = serde_json::from_str(&stdout(&berth_in(&dir, &["get", "mem"]))).expect("json");
+    assert!(get["resources"]["rss_mb"].as_u64() >= Some(50), "{get}");
+    let top = stdout(&berth_in(&dir, &["top"]));
+    let names: Vec<&str> = top
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split(' ').next())
+        .collect();
+    assert_eq!(names, ["mem", "small"], "{top}");
 }
 
 /// Soft: prints how long non-waiting calls take; CI shows it (`just bench`).
