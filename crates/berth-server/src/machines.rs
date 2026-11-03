@@ -208,6 +208,8 @@ pub fn connect(machine: &Machine, control_dir: &Path, autostart: bool) -> Result
     cmd.stdin(Stdio::from(OwnedFd::from(theirs.try_clone()?)))
         .stdout(Stdio::from(OwnedFd::from(theirs)))
         .spawn()?;
+    // `cmd` keeps its copies of `theirs`; closing them lets a dead ssh show here as EOF.
+    drop(cmd);
     match Client::over(ours) {
         Err(Error::Rpc(e)) if e.code == ErrorCode::Version.code() => {
             // The message is `BERTH_VERSION: client x, server y; …` (proto::RpcError::version).

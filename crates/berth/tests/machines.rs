@@ -232,3 +232,38 @@ fn events_on_a_machine_stream() {
         "{seen:?}"
     );
 }
+
+#[test]
+fn on_a_machine_ssh_cannot_reach_fails_fast_with_the_hint() {
+    let root = temp_dir("machine-down");
+    script(
+        &root.join("bin/ssh"),
+        "echo 'ssh: connect to host down.example: Connection refused' >&2\nexit 255\n",
+    );
+    assert!(
+        berth_on(&root, &["machine", "add", "down", "down.example"])
+            .status()
+            .expect("berth runs")
+            .success()
+    );
+    let mut child = berth_on(&root, &["--on", "down", "ls"])
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("berth runs");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while child.try_wait().expect("try_wait").is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("berth --on hung after ssh exited");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let out = child.wait_with_output().expect("output");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no answer from berth on down")
+            && stderr.contains("`ssh down.example berth hello`"),
+        "{stderr}"
+    );
+}
