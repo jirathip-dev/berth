@@ -68,6 +68,22 @@ protocol over stdin/stdout for SSH.
 - **Fast:** every CLI call that doesn't wait is < 20 ms locally.
 - **Public repo:** placeholders only in docs and tests, no setup-specific names.
 
+## Structured agents: ACP (idea, from Codync)
+
+Many agents speak the [Agent Client Protocol](https://agentclientprotocol.com) (ACP): prompts, tool calls, approvals and
+the final reply as JSON-RPC messages instead of screen text. [Codync](https://github.com/leepokai/Codync) drives 40+
+agents this way.
+
+For berth that suggests a second kind of terminal: `berth run --acp -- <agent-acp-cmd>`. The program speaks ACP on
+stdio, and berth exposes it through the same API as structured events:
+- `berth events` streams `turn`, `tool_call`, `approval_request` and `reply`;
+- `berth send` becomes `session/prompt`;
+- `berth wait --until done` is exact.
+
+The PTY mode stays for agents without ACP. This is an idea, not v0.1 scope. It needs a check of each agent's ACP
+adapter and its terms; e.g. Claude Code's adapter runs on the Agent SDK, so its subscription rules need confirming
+first.
+
 ## Integration with herdsman
 
 herdsman gets a `runtime = "herdr" | "berth"` setting (see herdsman's runtime spike). Lanes then:
