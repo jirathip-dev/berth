@@ -4,6 +4,8 @@
 //! Unix socket, one thread per connection. [`Client`] is the other end.
 #![forbid(unsafe_code)]
 
+pub mod acp;
+pub mod agents;
 mod events;
 mod registry;
 
@@ -47,6 +49,12 @@ pub enum Error {
     /// The server closed the connection or sent something that is not a response.
     #[error("bad response from the server: {0}")]
     BadResponse(String),
+    /// The ACP agent could not start or failed the handshake.
+    #[error("acp: {0}")]
+    Acp(String),
+    /// Installing, listing or removing an ACP agent failed.
+    #[error("agents: {0}")]
+    Agents(String),
     /// A JSON error.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
@@ -340,6 +348,9 @@ fn dispatch(
             Ok(Value::Object(serde_json::Map::new()))
         }
         Method::State => json(&reg.state(params(request)?)?),
+        Method::Emit => reg
+            .emit(params(request)?)
+            .map(|()| Value::Object(serde_json::Map::new())),
         Method::Hello | Method::Kill | Method::Wait => {
             Err(RpcError::new(ErrorCode::Internal, "handled above"))
         }

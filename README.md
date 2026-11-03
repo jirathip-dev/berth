@@ -46,6 +46,7 @@ around lanes:
 | `berth attach <t>` | Take over the terminal interactively; `Ctrl+\` detaches. |
 | `berth events [--label k=v] [--since N]` | Stream starts, state changes, exits, kills and resource moves as JSON lines; `--since` replays the last 1,000. |
 | `berth top` | The terminals by memory use, largest first. |
+| `berth run --acp <agent>`, `berth agents`, `berth approve`, `berth cancel` | ACP agents as structured terminals; see below. |
 | `berth --on <machine> …` / `berth machine add\|ls\|rm` | The same commands on another host over SSH (key login only). |
 
 **Persistence:** the server keeps PTYs alive while it runs. On server restart, kept terminals come back as shells in
@@ -69,21 +70,24 @@ protocol over stdin/stdout for SSH.
 - **Fast:** every CLI call that doesn't wait is < 20 ms locally.
 - **Public repo:** placeholders only in docs and tests, no setup-specific names.
 
-## Structured agents: ACP (idea, from Codync)
+## Two modes: terminals and ACP agents
 
 Many agents speak the [Agent Client Protocol](https://agentclientprotocol.com) (ACP): prompts, tool calls, approvals and
-the final reply as JSON-RPC messages instead of screen text. [Codync](https://github.com/leepokai/Codync) drives 40+
-agents this way.
+the final reply as JSON-RPC messages instead of screen text (an idea from [Codync](https://github.com/leepokai/Codync)).
+berth runs them as a second kind of terminal, through the same API:
 
-For berth that suggests a second kind of terminal: `berth run --acp -- <agent-acp-cmd>`. The program speaks ACP on
-stdio, and berth exposes it through the same API as structured events:
-- `berth events` streams `turn`, `tool_call`, `approval_request` and `reply`;
-- `berth send` becomes `session/prompt`;
-- `berth wait --until done` is exact.
+| Command | What it does |
+|---|---|
+| `berth agents` / `berth agents add <id>` / `berth agents rm <id>` | The installed ACP agents. `add` installs the version the [ACP registry](https://agentclientprotocol.com) lists now (its binary, `npx` or `uvx` entry), pinned; nothing upgrades it. |
+| `berth run --acp <id> [--policy allow\|deny\|ask] [--cwd D] [--label k=v…]` | Start the agent's ACP adapter on stdio: `initialize`, `session/new` (no MCP servers). |
+| `berth send <t> <text>` | `session/prompt`; the state is `working` until the turn ends, then `done` (note: the stop reason). |
+| `berth approve <t> <option>` | Answer a permission request (state `blocked`); `--policy` answers them instead. |
+| `berth cancel <t>` / `berth keys <t> esc` | `session/cancel`. |
+| `berth read <t>` | The transcript as text: prompts, one line per tool call, final replies. |
 
-The PTY mode stays for agents without ACP. This is an idea, not v0.1 scope. It needs a check of each agent's ACP
-adapter and its terms; e.g. Claude Code's adapter runs on the Agent SDK, so its subscription rules need confirming
-first.
+`berth events` adds `turn`, `text`, `tool_call`, `plan`, `mode`, `approval_request`, `approved` and `reply`, and
+`berth wait --until done` is exact. The PTY mode stays for agents without ACP. berth never handles provider
+credentials: each agent logs in its own way. See [docs/acp.md](docs/acp.md), including the Claude adapter caveat.
 
 ## Integration with herdsman
 

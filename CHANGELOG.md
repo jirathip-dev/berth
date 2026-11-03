@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- ACP client mode (M2c): `berth run --acp <agent> [--policy allow|deny|ask]` runs any Agent Client Protocol
+  (v1) agent as a structured terminal. `send` is a prompt, `approve` answers permission requests (state
+  `blocked`), `cancel` (or `keys <t> esc`) cancels the turn, the state is `working` then `done` with the stop
+  reason, `read` renders the JSONL transcript (prompts, one line per tool call, replies), and `events` gains
+  `turn`, `text`, `tool_call`, `plan`, `mode`, `approval_request`, `approved` and `reply`. `berth agents
+  [add|rm]` installs agents from the ACP registry, pinned. The protocol gains `emit`; a terminal carries
+  `acp`. See docs/acp.md.
 - Events and resources (M2b): `berth events [--label k=v] [--since N]` streams `started`, `state`,
   `exited {code}`, `killed` and `resources {rss_mb, cpu_pct}` as JSON lines, each with a `seq`; `--since`
   replays from a ring of the last 1,000. `berth serve --sample S` (default 2) samples every process

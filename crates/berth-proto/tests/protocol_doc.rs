@@ -6,10 +6,10 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use berth_proto::{
-    ErrorCode, Event, EventKind, EventsParams, Hello, KeysParams, LsParams, Method, ReadParams,
-    ReadResult, Reported, Request, ResizeParams, Resources, Response, RpcError, RunParams,
-    SendParams, State, StateParams, Target, TerminalInfo, VERSION, WaitOutcome, WaitParams,
-    WaitResult,
+    ApprovalOption, EmitParams, ErrorCode, Event, EventKind, EventsParams, Hello, KeysParams,
+    LsParams, Method, ReadParams, ReadResult, Reported, Request, ResizeParams, Resources, Response,
+    RpcError, RunParams, SendParams, State, StateParams, Target, TerminalInfo, VERSION,
+    WaitOutcome, WaitParams, WaitResult,
 };
 use serde_json::{Value, json, to_value};
 
@@ -26,6 +26,7 @@ fn info(state: State) -> TerminalInfo {
         reported: None,
         idle_after: None,
         resources: (state == State::Running).then_some(RESOURCES),
+        acp: None,
     }
 }
 
@@ -42,6 +43,47 @@ fn events() -> Vec<Event> {
         EventKind::Resources(RESOURCES),
         EventKind::Exited { code: Some(0) },
         EventKind::Killed,
+        EventKind::Turn {
+            prompt: "Fix the failing test".into(),
+        },
+        EventKind::Text {
+            text: "Looking at the test".into(),
+        },
+        EventKind::ToolCall {
+            id: "call_1".into(),
+            title: "Edit src/lib.rs".into(),
+            status: "pending".into(),
+        },
+        EventKind::Plan {
+            entries: vec![
+                json!({"content": "Fix the test", "priority": "high", "status": "in_progress"}),
+            ],
+        },
+        EventKind::Mode {
+            mode: "default".into(),
+        },
+        EventKind::ApprovalRequest {
+            tool: "Edit src/lib.rs".into(),
+            options: vec![
+                ApprovalOption {
+                    id: "allow".into(),
+                    name: "Allow".into(),
+                    kind: "allow_once".into(),
+                },
+                ApprovalOption {
+                    id: "reject".into(),
+                    name: "Reject".into(),
+                    kind: "reject_once".into(),
+                },
+            ],
+        },
+        EventKind::Approved {
+            option: "allow".into(),
+        },
+        EventKind::Reply {
+            text: "Fixed; all 12 tests pass.".into(),
+            stop_reason: "end_turn".into(),
+        },
     ]
     .into_iter()
     .zip(1..)
@@ -76,6 +118,37 @@ fn events_params() -> Value {
     .unwrap()
 }
 
+fn run_params() -> Value {
+    to_value(RunParams {
+        name: Some("build".into()),
+        labels: info(State::Running).labels,
+        cwd: PathBuf::from("/home/user/project"),
+        keep: true,
+        idle_after: None,
+        cmd: vec!["make".into(), "test".into()],
+        acp: None,
+    })
+    .unwrap()
+}
+
+fn emit_params() -> Value {
+    to_value(EmitParams {
+        name: "agent".into(),
+        kind: EventKind::Reply {
+            text: "All 12 tests pass.".into(),
+            stop_reason: "end_turn".into(),
+        },
+    })
+    .unwrap()
+}
+
+#[test]
+fn emit_params_round_trip() {
+    let p: EmitParams = serde_json::from_value(emit_params()).unwrap();
+    assert_eq!(p.name, "agent");
+    assert!(p.kind.is_acp());
+}
+
 /// An example params and result for each method, built from the typed structs.
 fn example(method: Method) -> (Value, Value) {
     let running = || to_value(info(State::Running)).unwrap();
@@ -88,18 +161,7 @@ fn example(method: Method) -> (Value, Value) {
             .unwrap();
             (hello.clone(), hello)
         }
-        Method::Run => (
-            to_value(RunParams {
-                name: Some("build".into()),
-                labels: info(State::Running).labels,
-                cwd: PathBuf::from("/home/user/project"),
-                keep: true,
-                idle_after: None,
-                cmd: vec!["make".into(), "test".into()],
-            })
-            .unwrap(),
-            running(),
-        ),
+        Method::Run => (run_params(), running()),
         Method::Ls => (
             to_value(LsParams {
                 labels: BTreeMap::from([("issue".into(), "7".into())]),
@@ -176,6 +238,7 @@ fn example(method: Method) -> (Value, Value) {
             .unwrap(),
         ),
         Method::Events => (events_params(), json!({})),
+        Method::Emit => (emit_params(), json!({})),
     }
 }
 
@@ -216,7 +279,10 @@ fn markdown() -> String {
     md.push_str(
         "\n## Events\n\nAn event names its terminal, carries its labels and counts up in `seq`; `event` is \
          `started`, `state` (the reported state changed), `exited` (by itself, with its `code`), `killed` (by \
-         `kill`) or `resources` (memory or CPU moved by more than 10 % since the last one).\n\n```json\n",
+         `kill`) or `resources` (memory or CPU moved by more than 10 % since the last one).\n\n\
+         An ACP terminal (`berth run --acp`) adds its agent's events, emitted by its bridge: `turn` (a prompt), \
+         `text` (a reply chunk), `tool_call` (started or changed), `plan`, `mode`, `approval_request` (answer \
+         with `berth approve`), `approved` and `reply` (the turn's whole reply and its `stop_reason`).\n\n```json\n",
     );
     for event in events() {
         writeln!(md, "{}", line(&event)).unwrap();

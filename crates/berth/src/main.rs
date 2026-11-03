@@ -12,6 +12,8 @@ use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
+use berth_server::acp::{self, Input, Policy};
+use berth_server::agents;
 use berth_server::proto::{
     EventsParams, KeysParams, LsParams, Method, ReadParams, ReadResult, Reported, RunParams,
     SendParams, State, StateParams, Target, TerminalInfo, WaitOutcome, WaitParams, WaitResult,
@@ -50,29 +52,7 @@ enum Command {
         sample: f64,
     },
     /// Start a terminal; prints its name.
-    Run {
-        /// The terminal's name (default: the first free `tN`).
-        #[arg(long)]
-        name: Option<String>,
-        /// A label, `k=v`; repeatable.
-        #[arg(long = "label", value_name = "K=V", value_parser = label)]
-        labels: Vec<(String, String)>,
-        /// The working directory (default: the current one).
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-        /// Come back as a shell in the same cwd after a server restart.
-        #[arg(long)]
-        keep: bool,
-        /// Start `berth serve --detach` first when no server runs.
-        #[arg(long)]
-        autostart: bool,
-        /// Report `idle` after S seconds without output, until the program reports a state.
-        #[arg(long, value_name = "S")]
-        idle_after: Option<u64>,
-        /// The program and its arguments.
-        #[arg(last = true, required = true)]
-        cmd: Vec<String>,
-    },
+    Run(RunArgs),
     /// List terminals.
     Ls {
         /// Only terminals carrying this label, `k=v`; repeatable.
@@ -98,7 +78,7 @@ enum Command {
         #[arg(long)]
         history: bool,
     },
-    /// Type text.
+    /// Type text; to an ACP terminal, send it as a prompt.
     Send {
         /// The terminal.
         name: String,
@@ -140,7 +120,8 @@ enum Command {
     /// Block until the reported state or the screen matches; exits 0 on a match, 1 when the program
     /// exits, 124 on timeout.
     Wait(WaitArgs),
-    /// Stream events as JSON lines: started, state, exited, killed and resources.
+    /// Stream events as JSON lines: started, state, exited, killed, resources, and ACP terminals' turn,
+    /// text, `tool_call`, plan, mode, `approval_request`, approved and reply.
     Events {
         /// Only terminals carrying this label, `k=v`; repeatable.
         #[arg(long = "label", value_name = "K=V", value_parser = label)]
@@ -151,6 +132,85 @@ enum Command {
     },
     /// List terminals by memory use, largest first.
     Top,
+    /// ACP: answer the oldest permission request with an option id (or kind, e.g. `allow_once`).
+    Approve {
+        /// The terminal.
+        name: String,
+        /// The option.
+        option: String,
+    },
+    /// ACP: cancel the running turn (as `berth keys <t> esc`).
+    Cancel {
+        /// The terminal.
+        name: String,
+    },
+    /// List the installed ACP agents, or add or remove one.
+    Agents {
+        #[command(subcommand)]
+        action: Option<AgentsCommand>,
+    },
+    /// The ACP bridge `run --acp` starts inside the terminal.
+    #[command(hide = true)]
+    AcpBridge {
+        #[arg(long)]
+        socket: PathBuf,
+        #[arg(long)]
+        state: PathBuf,
+        #[arg(long, value_parser = ["allow", "deny", "ask"])]
+        policy: String,
+        #[arg(last = true, required = true)]
+        cmd: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentsCommand {
+    /// Install an agent from the ACP registry, pinned to the version it lists now.
+    Add {
+        /// The registry id (`claude-acp`, `codex-acp`, `gemini`, `pi-acp`, …).
+        id: String,
+        /// The registry: a URL or a file.
+        #[arg(long, value_name = "SRC", default_value = agents::REGISTRY)]
+        registry: String,
+    },
+    /// Remove an installed agent.
+    Rm {
+        /// The agent id.
+        id: String,
+    },
+}
+
+/// `berth run`'s arguments.
+#[derive(Args)]
+struct RunArgs {
+    /// The terminal's name (default: the first free `tN`).
+    #[arg(long)]
+    name: Option<String>,
+    /// A label, `k=v`; repeatable.
+    #[arg(long = "label", value_name = "K=V", value_parser = label)]
+    labels: Vec<(String, String)>,
+    /// The working directory (default: the current one).
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+    /// Come back as a shell in the same cwd after a server restart.
+    #[arg(long)]
+    keep: bool,
+    /// Start `berth serve --detach` first when no server runs.
+    #[arg(long)]
+    autostart: bool,
+    /// Report `idle` after S seconds without output, until the program reports a state.
+    #[arg(long, value_name = "S")]
+    idle_after: Option<u64>,
+    /// Run the installed ACP agent ID (`berth agents`) as a structured session; with a command
+    /// after `--`, that command is its ACP adapter instead.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["keep", "idle_after"])]
+    acp: Option<String>,
+    /// ACP: answer permission requests `allow`, `deny`, or `ask` (wait for `berth approve`).
+    #[arg(long, requires = "acp", value_parser = ["allow", "deny", "ask"], default_value = "ask")]
+    policy: String,
+    /// The program and its arguments.
+    #[arg(last = true, required_unless_present = "acp")]
+    cmd: Vec<String>,
 }
 
 /// `berth wait`'s arguments.
@@ -195,28 +255,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.command {
         Command::Hello => println!("berth {}", env!("CARGO_PKG_VERSION")),
         Command::Serve { detach, sample } => serve(&paths, cli.dir.as_deref(), detach, sample)?,
-        Command::Run {
-            name,
-            labels,
-            cwd,
-            keep,
-            autostart,
-            idle_after,
-            cmd,
-        } => {
-            let here = std::env::current_dir().context("current directory")?;
-            let params = RunParams {
-                name,
-                labels: labels.into_iter().collect(),
-                cwd: cwd.map_or_else(|| here.clone(), |d| here.join(d)),
-                keep,
-                idle_after,
-                cmd,
-            };
-            let mut client = connect(&paths, cli.dir.as_deref(), Some(autostart))?;
-            let info: TerminalInfo = client.call(Method::Run, &params)?;
-            print(json, &info, || format!("{}\n", info.name))?;
-        }
+        Command::Run(args) => run_terminal(&paths, cli.dir.as_deref(), json, args)?,
         Command::Ls { labels } => {
             let params = LsParams {
                 labels: labels.into_iter().collect(),
@@ -250,11 +289,24 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 }
             })?;
         }
-        Command::Send { name, text } => {
-            let done: Value =
-                connect(&paths, None, None)?.call(Method::Send, &SendParams { name, text })?;
-            print(json, &done, String::new)?;
+        Command::Send { name, text } => send(&paths, json, name, text)?,
+        Command::Approve { name, option } => {
+            print(
+                json,
+                &to_acp(&paths, name, &Input::Approve(option))?,
+                String::new,
+            )?;
         }
+        Command::Cancel { name } => {
+            print(json, &to_acp(&paths, name, &Input::Cancel)?, String::new)?;
+        }
+        Command::Agents { action } => agents_cmd(&paths, json, action)?,
+        Command::AcpBridge {
+            socket,
+            state,
+            policy,
+            cmd,
+        } => return bridge(&cmd, &socket, &state, &policy),
         Command::Keys { name, keys } => {
             let done: Value =
                 connect(&paths, None, None)?.call(Method::Keys, &KeysParams { name, keys })?;
@@ -298,6 +350,129 @@ fn serve(paths: &Paths, dir: Option<&Path>, detach: bool, sample: f64) -> anyhow
         .filter(|d| !d.is_zero())
         .context("--sample must be a positive number of seconds")?;
     berth_server::serve(paths, every).context("berth serve")
+}
+
+/// `berth run`: prints the new terminal's name.
+fn run_terminal(paths: &Paths, dir: Option<&Path>, json: bool, a: RunArgs) -> anyhow::Result<()> {
+    let here = std::env::current_dir().context("current directory")?;
+    let cmd = match &a.acp {
+        Some(id) => bridge_cmd(paths, id, &a.policy, a.cmd)?,
+        None => a.cmd,
+    };
+    let params = RunParams {
+        name: a.name,
+        labels: a.labels.into_iter().collect(),
+        cwd: a.cwd.map_or_else(|| here.clone(), |d| here.join(d)),
+        keep: a.keep,
+        idle_after: a.idle_after,
+        cmd,
+        acp: a.acp,
+    };
+    let mut client = connect(paths, dir, Some(a.autostart))?;
+    let info: TerminalInfo = client.call(Method::Run, &params)?;
+    print(json, &info, || format!("{}\n", info.name))
+}
+
+/// `berth send`: an ACP terminal gets a framed prompt, reported `working` first so `send; wait --until
+/// done` never sees the last turn.
+fn send(paths: &Paths, json: bool, name: String, text: String) -> anyhow::Result<()> {
+    let mut client = connect(paths, None, None)?;
+    let info: TerminalInfo = client.call(Method::Get, &Target { name: name.clone() })?;
+    let text = if info.acp.is_some() {
+        let report = Reported {
+            state: "working".to_owned(),
+            note: None,
+        };
+        let params = StateParams {
+            name: name.clone(),
+            report,
+        };
+        let _: TerminalInfo = client.call(Method::State, &params)?;
+        acp::frame(&Input::Prompt(text))
+    } else {
+        text
+    };
+    let done: Value = client.call(Method::Send, &SendParams { name, text })?;
+    print(json, &done, String::new)
+}
+
+/// `berth acp-bridge`: the bridge on this terminal, in raw mode; exits with the agent's code.
+fn bridge(cmd: &[String], socket: &Path, state: &Path, policy: &str) -> anyhow::Result<ExitCode> {
+    let policy = match policy {
+        "allow" => Policy::Allow,
+        "deny" => Policy::Deny,
+        _ => Policy::Ask,
+    };
+    let here = std::env::current_dir().context("current directory")?;
+    let _raw = attach::RawMode::enter()?;
+    let code = acp::bridge(cmd, &here, socket, state, policy)?;
+    Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
+}
+
+/// `berth run --acp`: this binary's ACP bridge around the adapter `cmd`, else the installed agent's.
+fn bridge_cmd(
+    paths: &Paths,
+    id: &str,
+    policy: &str,
+    cmd: Vec<String>,
+) -> anyhow::Result<Vec<String>> {
+    let cmd = if cmd.is_empty() {
+        let installed = agents::list(&paths.state)?;
+        let Some(agent) = installed.into_iter().find(|a| a.id == id) else {
+            bail!("ACP agent {id} is not installed; `berth agents add {id}`");
+        };
+        agent.cmd
+    } else {
+        cmd
+    };
+    let exe = std::env::current_exe()?;
+    let path = |p: &Path| p.to_string_lossy().into_owned();
+    let bridge = [
+        path(&exe),
+        "acp-bridge".to_owned(),
+        "--socket".to_owned(),
+        path(&paths.socket),
+        "--state".to_owned(),
+        path(&paths.state),
+        "--policy".to_owned(),
+        policy.to_owned(),
+        "--".to_owned(),
+    ];
+    Ok([bridge.to_vec(), cmd].concat())
+}
+
+/// Delivers `input` to an ACP terminal's bridge.
+fn to_acp(paths: &Paths, name: String, input: &Input) -> anyhow::Result<Value> {
+    let mut client = connect(paths, None, None)?;
+    let info: TerminalInfo = client.call(Method::Get, &Target { name: name.clone() })?;
+    if info.acp.is_none() {
+        bail!("{name} is not an ACP terminal (berth run --acp)");
+    }
+    let text = acp::frame(input);
+    Ok(client.call(Method::Send, &SendParams { name, text })?)
+}
+
+/// `berth agents [add|rm]`.
+fn agents_cmd(paths: &Paths, json: bool, action: Option<AgentsCommand>) -> anyhow::Result<()> {
+    let line = |a: &agents::Agent| format!("{} {} ({})\n", a.id, a.version, a.distribution);
+    match action {
+        None => {
+            let list = agents::list(&paths.state)?;
+            print(json, &list, || {
+                list.iter()
+                    .map(|a| format!("{}  {}", line(a).trim_end(), a.cmd.join(" ")) + "\n")
+                    .collect()
+            })
+        }
+        Some(AgentsCommand::Add { id, registry }) => {
+            let agent = agents::add(&paths.state, &id, &registry)?;
+            print(json, &agent, || format!("installed {}", line(&agent)))
+        }
+        Some(AgentsCommand::Rm { id }) => {
+            let agent = agents::rm(&paths.state, &id)?;
+            print(json, &agent, || format!("removed {}", line(&agent)))
+        }
+    }
 }
 
 /// `berth top`: the terminals by memory, largest first.
