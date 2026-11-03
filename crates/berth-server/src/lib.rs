@@ -4,6 +4,7 @@
 //! Unix socket, one thread per connection. [`Client`] is the other end.
 #![forbid(unsafe_code)]
 
+mod events;
 mod registry;
 
 use std::ffi::OsString;
@@ -16,13 +17,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use berth_core::{Pattern, STATES, Wake};
+use berth_core::proctree::{self, ProcessTable as _};
+use berth_core::{Pattern, STATES, Terminal, Wake};
 pub use berth_proto as proto;
 use proto::{
     ErrorCode, Hello, Method, Request, Response, RpcError, Target, VERSION, WaitOutcome,
     WaitParams, WaitResult,
 };
-use registry::{Attached, Registry};
+use registry::{Registry, Stream};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -104,16 +106,53 @@ fn lock(m: &Mutex<Registry>) -> MutexGuard<'_, Registry> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Loads the state, binds the socket (mode 0600, its directory 0700) and serves until killed.
+/// Refreshes the registry whenever `term`'s reported state changes and once it exits, so the events
+/// stream without anyone asking.
+fn watch(registry: &Arc<Mutex<Registry>>, term: Arc<Terminal>) {
+    let registry = Arc::clone(registry);
+    std::thread::spawn(move || {
+        loop {
+            // Read before the refresh, so a change in between wakes the wait at once.
+            let last = term.report();
+            let _ = lock(&registry).refresh();
+            if !matches!(
+                term.wait_until(|t| t.report() != last, None),
+                Ok(Wake::Matched)
+            ) {
+                let _ = lock(&registry).refresh();
+                return;
+            }
+        }
+    });
+}
+
+/// Samples every running tree's memory and CPU every `every`.
+fn sample(registry: &Mutex<Registry>, every: Duration) {
+    let table = proctree::system();
+    loop {
+        std::thread::sleep(every);
+        if let Ok(procs) = table.list() {
+            lock(registry).sample(&procs, Instant::now());
+        }
+    }
+}
+
+/// Loads the state, binds the socket (mode 0600, its directory 0700) and serves until killed, sampling
+/// each terminal's memory and CPU every `sample_every`.
 ///
 /// # Errors
 /// [`Error::AlreadyRunning`] when another server answers on the socket; [`Error::Io`] or
 /// [`Error::Json`] when the state file or socket cannot be set up.
-pub fn serve(paths: &Paths) -> Result<(), Error> {
+pub fn serve(paths: &Paths, sample_every: Duration) -> Result<(), Error> {
     if UnixStream::connect(&paths.socket).is_ok() {
         return Err(Error::AlreadyRunning(paths.socket.clone()));
     }
     let registry = Arc::new(Mutex::new(Registry::load(&paths.state)?));
+    for term in lock(&registry).running() {
+        watch(&registry, term);
+    }
+    let sampler = Arc::clone(&registry);
+    std::thread::spawn(move || sample(&sampler, sample_every));
     if let Some(dir) = paths.socket.parent() {
         fs::DirBuilder::new()
             .recursive(true)
@@ -140,14 +179,14 @@ pub fn serve(paths: &Paths) -> Result<(), Error> {
 struct Session {
     /// The handshake passed.
     hello: bool,
-    /// An `attach` just answered: the redraw and the output to stream next.
-    attach: Option<Attached>,
-    /// The connection streams a terminal's output; responses are no longer written.
-    attached: bool,
+    /// An `attach` or `events` just answered: the redraw or replay, and the stream to write next.
+    stream: Option<Stream>,
+    /// The connection streams output or events; responses are no longer written.
+    streaming: bool,
 }
 
 /// Answers one connection's requests, line by line, until it closes.
-fn connection(registry: &Mutex<Registry>, stream: &UnixStream) {
+fn connection(registry: &Arc<Mutex<Registry>>, stream: &UnixStream) {
     let mut session = Session::default();
     let mut out = stream;
     for line in BufReader::new(stream).lines() {
@@ -156,7 +195,7 @@ fn connection(registry: &Mutex<Registry>, stream: &UnixStream) {
             continue;
         }
         if let Some(response) = respond(registry, &mut session, &line)
-            && !session.attached
+            && !session.streaming
         {
             let Ok(mut bytes) = serde_json::to_vec(&response) else {
                 return;
@@ -166,11 +205,11 @@ fn connection(registry: &Mutex<Registry>, stream: &UnixStream) {
                 return;
             }
         }
-        if let Some((redraw, output)) = session.attach.take() {
+        if let Some((redraw, output)) = session.stream.take() {
             let Ok(mut out) = stream.try_clone() else {
                 return;
             };
-            session.attached = true;
+            session.streaming = true;
             std::thread::spawn(move || {
                 let _ = out.write_all(&redraw);
                 for chunk in output {
@@ -185,7 +224,7 @@ fn connection(registry: &Mutex<Registry>, stream: &UnixStream) {
 }
 
 /// The response to one request line; `None` for a notification.
-fn respond(registry: &Mutex<Registry>, session: &mut Session, line: &str) -> Option<Response> {
+fn respond(registry: &Arc<Mutex<Registry>>, session: &mut Session, line: &str) -> Option<Response> {
     let value: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {
@@ -230,7 +269,7 @@ fn json<T: Serialize>(value: &T) -> Result<Value, RpcError> {
 }
 
 fn dispatch(
-    registry: &Mutex<Registry>,
+    registry: &Arc<Mutex<Registry>>,
     session: &mut Session,
     request: &Request,
 ) -> Result<Value, RpcError> {
@@ -256,7 +295,7 @@ fn dispatch(
         let Target { name } = params(request)?;
         let mut reg = lock(registry);
         reg.refresh()?;
-        let Some(term) = reg.to_kill(&name)? else {
+        let Some(term) = reg.mark_kill(&name)? else {
             return json(&reg.get(&name)?);
         };
         drop(reg);
@@ -271,7 +310,13 @@ fn dispatch(
     let mut reg = lock(registry);
     reg.refresh()?;
     match method {
-        Method::Run => json(&reg.run(params(request)?)?),
+        Method::Run => {
+            let info = reg.run(params(request)?)?;
+            if let (Some(term), _) = reg.to_wait(&info.name)? {
+                watch(registry, term);
+            }
+            json(&info)
+        }
         Method::Ls => json(&reg.ls(&params(request)?)),
         Method::Get => json(&reg.get(&params::<Target>(request)?.name)?),
         Method::Read => json(&reg.read(&params(request)?)?),
@@ -287,8 +332,12 @@ fn dispatch(
             .map(|()| Value::Object(serde_json::Map::new())),
         Method::Attach => {
             let (info, attached) = reg.attach(&params::<Target>(request)?.name)?;
-            session.attach = Some(attached);
+            session.stream = Some(attached);
             json(&info)
+        }
+        Method::Events => {
+            session.stream = Some(reg.subscribe(params(request)?));
+            Ok(Value::Object(serde_json::Map::new()))
         }
         Method::State => json(&reg.state(params(request)?)?),
         Method::Hello | Method::Kill | Method::Wait => {

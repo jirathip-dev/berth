@@ -6,9 +6,10 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use berth_proto::{
-    ErrorCode, Hello, KeysParams, LsParams, Method, ReadParams, ReadResult, Reported, Request,
-    ResizeParams, Response, RpcError, RunParams, SendParams, State, StateParams, Target,
-    TerminalInfo, VERSION, WaitOutcome, WaitParams, WaitResult,
+    ErrorCode, Event, EventKind, EventsParams, Hello, KeysParams, LsParams, Method, ReadParams,
+    ReadResult, Reported, Request, ResizeParams, Resources, Response, RpcError, RunParams,
+    SendParams, State, StateParams, Target, TerminalInfo, VERSION, WaitOutcome, WaitParams,
+    WaitResult,
 };
 use serde_json::{Value, json, to_value};
 
@@ -24,7 +25,33 @@ fn info(state: State) -> TerminalInfo {
         pid: (state == State::Running).then_some(4242),
         reported: None,
         idle_after: None,
+        resources: (state == State::Running).then_some(RESOURCES),
     }
+}
+
+const RESOURCES: Resources = Resources {
+    rss_mb: 52,
+    cpu_pct: 3,
+};
+
+/// One example of each event kind, in the order a terminal's life emits them.
+fn events() -> Vec<Event> {
+    [
+        EventKind::Started,
+        EventKind::State(done()),
+        EventKind::Resources(RESOURCES),
+        EventKind::Exited { code: Some(0) },
+        EventKind::Killed,
+    ]
+    .into_iter()
+    .zip(1..)
+    .map(|(kind, seq)| Event {
+        seq,
+        name: "build".into(),
+        labels: info(State::Running).labels,
+        kind,
+    })
+    .collect()
 }
 
 fn done() -> Reported {
@@ -37,6 +64,14 @@ fn done() -> Reported {
 fn target() -> Value {
     to_value(Target {
         name: "build".into(),
+    })
+    .unwrap()
+}
+
+fn events_params() -> Value {
+    to_value(EventsParams {
+        labels: BTreeMap::from([("issue".into(), "7".into())]),
+        since: Some(120),
     })
     .unwrap()
 }
@@ -140,6 +175,7 @@ fn example(method: Method) -> (Value, Value) {
             })
             .unwrap(),
         ),
+        Method::Events => (events_params(), json!({})),
     }
 }
 
@@ -160,7 +196,8 @@ fn markdown() -> String {
          A terminal, as `run`, `ls`, `get`, `kill` and `rm` return it: `state` is `running` or `exited`; `exit` is\n\
          the exit status (128 + N for signal N), `null` while running or when the program was lost in a server\n\
          restart; `pid` is set while running; `reported` is the state the program last reported (absent until\n\
-         then); `idle_after` is set when the `idle` fallback is on.\n\n## Methods\n"
+         then); `idle_after` is set when the `idle` fallback is on; `resources` is the process tree's memory\n\
+         (MiB) and CPU (percent of one core) at the last sample, while running.\n\n## Methods\n"
     );
     for method in Method::ALL {
         let (params, result) = example(method);
@@ -176,6 +213,15 @@ fn markdown() -> String {
         )
         .unwrap();
     }
+    md.push_str(
+        "\n## Events\n\nAn event names its terminal, carries its labels and counts up in `seq`; `event` is \
+         `started`, `state` (the reported state changed), `exited` (by itself, with its `code`), `killed` (by \
+         `kill`) or `resources` (memory or CPU moved by more than 10 % since the last one).\n\n```json\n",
+    );
+    for event in events() {
+        writeln!(md, "{}", line(&event)).unwrap();
+    }
+    md.push_str("```\n");
     md.push_str("\n## Errors\n\nAn error's `message` starts with its name: `NAME: detail`.\n\n");
     md.push_str("| Code | Name |\n|---|---|\n");
     for code in ErrorCode::ALL {
@@ -205,7 +251,7 @@ fn method_names_round_trip() {
     for method in Method::ALL {
         assert_eq!(Method::parse(method.name()), Some(method));
     }
-    assert_eq!(Method::parse("events"), None);
+    assert_eq!(Method::parse("nope"), None);
 }
 
 #[test]

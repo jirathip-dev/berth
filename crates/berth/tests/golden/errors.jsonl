@@ -1,7 +1,7 @@
 {"id":1,"jsonrpc":"2.0","method":"ls","params":{}}
 {"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"NO_HELLO: send hello with your version first"}}
-{"id":8,"jsonrpc":"2.0","method":"events","params":{"name":"build"}}
-{"jsonrpc":"2.0","id":8,"error":{"code":-32601,"message":"NO_SUCH_METHOD: events"}}
+{"id":8,"jsonrpc":"2.0","method":"nope","params":{"name":"build"}}
+{"jsonrpc":"2.0","id":8,"error":{"code":-32601,"message":"NO_SUCH_METHOD: nope"}}
 {"id":19,"jsonrpc":"2.0","method":"state","params":{"name":"build","state":"idle"}}
 {"jsonrpc":"2.0","id":19,"error":{"code":-32602,"message":"INVALID_PARAMS: state must be working, blocked, done or error"}}
 {"id":20,"jsonrpc":"2.0","method":"wait","params":{"name":"build"}}
