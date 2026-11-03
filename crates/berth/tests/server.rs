@@ -3,61 +3,19 @@
 //! Every method's request and response is checked against `tests/golden/<method>.jsonl` (the temp
 //! dir, version and pids normalised). Regenerate with `BERTH_BLESS=1 cargo test -p berth`.
 
+mod common;
+
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
 
 use berth_server::proto::{Method, ReadParams, ReadResult, SendParams, State, TerminalInfo};
 use berth_server::{Client, Paths};
+use common::{Server, eventually, temp_dir};
 use serde_json::{Value, json};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// A fresh, canonical temp dir (macOS `/var` is a symlink, and the shell's `pwd` prints the real path).
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("berth-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    dir.canonicalize().expect("canonical temp dir")
-}
-
-/// Polls `check` for up to ten seconds.
-fn eventually(what: &str, mut check: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !check() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// A `berth serve --dir` process, killed (SIGKILL) on drop.
-struct Server(Child);
-
-impl Server {
-    fn start(dir: &Path) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_berth"))
-            .args(["serve", "--dir"])
-            .arg(dir)
-            .env("SHELL", "/bin/sh")
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("berth serve starts");
-        let server = Self(child);
-        let socket = Paths::in_dir(dir).socket;
-        eventually("the socket", || UnixStream::connect(&socket).is_ok());
-        server
-    }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 /// A raw connection: exact request and response lines.
 struct Conn {
@@ -211,7 +169,7 @@ fn run_ls_read_kill_over_the_socket_match_the_goldens() {
     );
 
     for (id, method, params) in [
-        (8, "attach", json!({"name": "build"})),
+        (8, "wait", json!({"name": "build"})),
         (9, "get", json!({"name": "nope"})),
         (10, "rm", json!({"name": "build"})),
         (11, "run", other.clone()),

@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The `berth` CLI (M1c): `run`, `ls`, `get`, `read`, `send`, `keys`, `kill`, `rm` and `attach` (raw mode,
+  `Ctrl+\` detaches, window resizes forwarded) as a thin client, `--json` on every command, a global
+  `--dir`, `berth serve --detach` and `berth run --autostart`. The protocol gains `resize` and `attach`.
 - `berth serve` (M1b): the per-user server on a Unix socket (mode 0600) speaking newline-delimited
   JSON-RPC 2.0 (`hello run ls get read send keys kill rm`), unique names and `k=v` labels, a state file
   (atomic writes) that brings `keep` terminals back as shells in their cwd after a restart, and a

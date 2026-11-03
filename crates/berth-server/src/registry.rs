@@ -8,12 +8,13 @@ use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use berth_core::{Size, Terminal};
 use berth_proto::{
-    ErrorCode, KeysParams, LsParams, ReadParams, ReadResult, RpcError, RunParams, SendParams,
-    State, TerminalInfo,
+    ErrorCode, KeysParams, LsParams, ReadParams, ReadResult, ResizeParams, RpcError, RunParams,
+    SendParams, State, TerminalInfo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +24,9 @@ const SIZE: Size = Size { rows: 24, cols: 80 };
 pub(crate) const GRACE: Duration = Duration::from_secs(2);
 /// The state file's format version.
 const FILE_VERSION: u32 = 1;
+
+/// What `attach` streams: a redraw of the screen, then the raw output.
+pub(crate) type Attached = (Vec<u8>, Receiver<Vec<u8>>);
 
 /// The state file: every terminal's last known info.
 #[derive(Serialize, Deserialize)]
@@ -271,6 +275,29 @@ impl Registry {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| RpcError::new(ErrorCode::InvalidParams, e))?;
         term.write(&bytes.concat()).map_err(internal)
+    }
+
+    /// `resize`: resizes a running terminal.
+    pub(crate) fn resize(&self, p: &ResizeParams) -> Result<(), RpcError> {
+        if p.rows == 0 || p.cols == 0 {
+            return Err(RpcError::new(
+                ErrorCode::InvalidParams,
+                "rows and cols must be at least 1",
+            ));
+        }
+        let size = Size {
+            rows: p.rows,
+            cols: p.cols,
+        };
+        self.live(&p.name)?.resize(size).map_err(internal)
+    }
+
+    /// `attach`: a running terminal, a redraw of its screen, and its raw output from now on.
+    pub(crate) fn attach(&self, name: &str) -> Result<(TerminalInfo, Attached), RpcError> {
+        let term = self.live(name)?;
+        let output = term.subscribe();
+        let redraw = format!("\x1b[H\x1b[2J{}", term.screen().replace('\n', "\r\n"));
+        Ok((self.get(name)?, (redraw.into_bytes(), output)))
     }
 
     /// The terminal to kill, if it still runs; the caller kills it without holding the registry.

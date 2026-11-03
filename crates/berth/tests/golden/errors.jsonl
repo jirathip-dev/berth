@@ -1,7 +1,7 @@
 {"id":1,"jsonrpc":"2.0","method":"ls","params":{}}
 {"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"NO_HELLO: send hello with your version first"}}
-{"id":8,"jsonrpc":"2.0","method":"attach","params":{"name":"build"}}
-{"jsonrpc":"2.0","id":8,"error":{"code":-32601,"message":"NO_SUCH_METHOD: attach"}}
+{"id":8,"jsonrpc":"2.0","method":"wait","params":{"name":"build"}}
+{"jsonrpc":"2.0","id":8,"error":{"code":-32601,"message":"NO_SUCH_METHOD: wait"}}
 {"id":9,"jsonrpc":"2.0","method":"get","params":{"name":"nope"}}
 {"jsonrpc":"2.0","id":9,"error":{"code":-32002,"message":"NO_SUCH_TERMINAL: nope"}}
 {"id":10,"jsonrpc":"2.0","method":"rm","params":{"name":"build"}}

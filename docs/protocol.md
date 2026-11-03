@@ -98,6 +98,24 @@ Remove an exited terminal; returns it as it was.
 {"jsonrpc":"2.0","id":1,"result":{"cmd":["make","test"],"cwd":"/home/user/project","exit":0,"keep":true,"labels":{"issue":"7","role":"impl"},"name":"build","pid":null,"state":"exited"}}
 ```
 
+### `resize`
+
+Resize the terminal; the program gets SIGWINCH.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"resize","params":{"cols":120,"name":"build","rows":50}}
+{"jsonrpc":"2.0","id":1,"result":{}}
+```
+
+### `attach`
+
+Take over the terminal. After the response the server writes a redraw (clear, then the screen text) and the program's raw output, and closes the connection when the program's PTY closes. The client sends only notifications from then on (`send`, `keys`, `resize`); detaching is closing the connection.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"attach","params":{"name":"build"}}
+{"jsonrpc":"2.0","id":1,"result":{"cmd":["make","test"],"cwd":"/home/user/project","exit":null,"keep":true,"labels":{"issue":"7","role":"impl"},"name":"build","pid":4242,"state":"running"}}
+```
+
 ## Errors
 
 An error's `message` starts with its name: `NAME: detail`.
