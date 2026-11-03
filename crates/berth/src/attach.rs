@@ -15,10 +15,10 @@ const DETACH: u8 = 0x1c;
 const RESIZE_POLL: Duration = Duration::from_millis(100);
 
 /// Stdin in raw mode while alive; restores the saved mode on drop. A no-op when stdin is not a tty.
-struct RawMode(Option<Termios>);
+pub(crate) struct RawMode(Option<Termios>);
 
 impl RawMode {
-    fn enter() -> io::Result<Self> {
+    pub(crate) fn enter() -> io::Result<Self> {
         let Ok(saved) = tcgetattr(io::stdin()) else {
             return Ok(Self(None));
         };

@@ -145,9 +145,20 @@ Stream events. After the response the server writes one event per line (see Even
 {"jsonrpc":"2.0","id":1,"result":{}}
 ```
 
+### `emit`
+
+Emit one of an ACP terminal's structured events (`turn`, `text`, `tool_call`, `plan`, `mode`, `approval_request`, `approved`, `reply`); its bridge (`berth run --acp`) calls this. Other events are refused.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"emit","params":{"event":"reply","name":"agent","stop_reason":"end_turn","text":"All 12 tests pass."}}
+{"jsonrpc":"2.0","id":1,"result":{}}
+```
+
 ## Events
 
 An event names its terminal, carries its labels and counts up in `seq`; `event` is `started`, `state` (the reported state changed), `exited` (by itself, with its `code`), `killed` (by `kill`) or `resources` (memory or CPU moved by more than 10 % since the last one).
+
+An ACP terminal (`berth run --acp`) adds its agent's events, emitted by its bridge: `turn` (a prompt), `text` (a reply chunk), `tool_call` (started or changed), `plan`, `mode`, `approval_request` (answer with `berth approve`), `approved` and `reply` (the turn's whole reply and its `stop_reason`).
 
 ```json
 {"seq":1,"name":"build","labels":{"issue":"7","role":"impl"},"event":"started"}
@@ -155,6 +166,14 @@ An event names its terminal, carries its labels and counts up in `seq`; `event` 
 {"seq":3,"name":"build","labels":{"issue":"7","role":"impl"},"event":"resources","rss_mb":52,"cpu_pct":3}
 {"seq":4,"name":"build","labels":{"issue":"7","role":"impl"},"event":"exited","code":0}
 {"seq":5,"name":"build","labels":{"issue":"7","role":"impl"},"event":"killed"}
+{"seq":6,"name":"build","labels":{"issue":"7","role":"impl"},"event":"turn","prompt":"Fix the failing test"}
+{"seq":7,"name":"build","labels":{"issue":"7","role":"impl"},"event":"text","text":"Looking at the test"}
+{"seq":8,"name":"build","labels":{"issue":"7","role":"impl"},"event":"tool_call","id":"call_1","title":"Edit src/lib.rs","status":"pending"}
+{"seq":9,"name":"build","labels":{"issue":"7","role":"impl"},"event":"plan","entries":[{"content":"Fix the test","priority":"high","status":"in_progress"}]}
+{"seq":10,"name":"build","labels":{"issue":"7","role":"impl"},"event":"mode","mode":"default"}
+{"seq":11,"name":"build","labels":{"issue":"7","role":"impl"},"event":"approval_request","tool":"Edit src/lib.rs","options":[{"id":"allow","name":"Allow","kind":"allow_once"},{"id":"reject","name":"Reject","kind":"reject_once"}]}
+{"seq":12,"name":"build","labels":{"issue":"7","role":"impl"},"event":"approved","option":"allow"}
+{"seq":13,"name":"build","labels":{"issue":"7","role":"impl"},"event":"reply","text":"Fixed; all 12 tests pass.","stop_reason":"end_turn"}
 ```
 
 ## Errors

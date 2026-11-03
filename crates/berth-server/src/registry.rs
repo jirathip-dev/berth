@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 use berth_core::proctree::{self, ProcessInfo};
 use berth_core::{Report, STATES, Size, Terminal};
 use berth_proto::{
-    ErrorCode, EventKind, EventsParams, KeysParams, LsParams, ReadParams, ReadResult, Reported,
-    ResizeParams, Resources, RpcError, RunParams, SendParams, State, StateParams, TerminalInfo,
+    EmitParams, ErrorCode, EventKind, EventsParams, KeysParams, LsParams, ReadParams, ReadResult,
+    Reported, ResizeParams, Resources, RpcError, RunParams, SendParams, State, StateParams,
+    TerminalInfo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -335,6 +336,7 @@ impl Registry {
             reported: None,
             idle_after: p.idle_after,
             resources: None,
+            acp: p.acp,
         };
         self.events.emit(&name, &info.labels, EventKind::Started);
         let entry = Entry::new(info.clone(), Some(Arc::new(term)));
@@ -360,9 +362,19 @@ impl Registry {
         Ok(self.entry(name)?.view())
     }
 
-    /// `read`: screen or history text; empty for a terminal lost in a restart.
+    /// `read`: screen or history text, or an ACP terminal's transcript rendered; empty for a terminal
+    /// lost in a restart.
     pub(crate) fn read(&self, p: &ReadParams) -> Result<ReadResult, RpcError> {
-        let Some(term) = &self.entry(&p.name)?.term else {
+        let entry = self.entry(&p.name)?;
+        if entry.info.acp.is_some() {
+            let file = fs::read_to_string(crate::acp::transcript(&self.path, &p.name));
+            let text = crate::acp::render(&file.unwrap_or_default());
+            let lines: Vec<&str> = text.lines().collect();
+            let n = p.lines.unwrap_or(usize::MAX);
+            let text = lines[lines.len().saturating_sub(n)..].join("\n");
+            return Ok(ReadResult { text });
+        }
+        let Some(term) = &entry.term else {
             return Ok(ReadResult {
                 text: String::new(),
             });
@@ -435,6 +447,20 @@ impl Registry {
         });
         self.refresh()?;
         self.get(&p.name)
+    }
+
+    /// `emit`: an ACP terminal's structured event.
+    pub(crate) fn emit(&mut self, p: EmitParams) -> Result<(), RpcError> {
+        if !p.kind.is_acp() {
+            return Err(RpcError::new(
+                ErrorCode::InvalidParams,
+                "emit takes only ACP events",
+            ));
+        }
+        self.live(&p.name)?;
+        let labels = self.entry(&p.name)?.info.labels.clone();
+        self.events.emit(&p.name, &labels, p.kind);
+        Ok(())
     }
 
     /// The terminal to wait on (`None` when lost in a restart) and its info; the caller waits without
