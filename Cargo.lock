@@ -69,8 +69,11 @@ name = "berth"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "berth-core",
  "berth-server",
  "clap",
+ "rustix",
+ "serde",
  "serde_json",
 ]
 

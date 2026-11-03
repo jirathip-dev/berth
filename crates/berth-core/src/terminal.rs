@@ -4,6 +4,7 @@ use std::ffi::OsStr;
 use std::io::{Read as _, Write as _};
 use std::path::Path;
 use std::process::{Child, ExitStatus};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -23,8 +24,12 @@ pub struct Terminal {
     pty: Arc<pty_process::blocking::Pty>,
     child: Mutex<Child>,
     screen: Arc<Mutex<Screen>>,
+    outputs: Arc<Outputs>,
     pid: i32,
 }
+
+/// The senders of [`Terminal::subscribe`]rs; `None` once the PTY has closed.
+type Outputs = Mutex<Option<Vec<Sender<Vec<u8>>>>>;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -62,12 +67,17 @@ impl Terminal {
             .map_err(|_| Error::Io(std::io::Error::other("pid out of range")))?;
         let pty = Arc::new(pty);
         let screen = Arc::new(Mutex::new(Screen::new(size, SCROLLBACK)));
-        let (reader, sink) = (Arc::clone(&pty), Arc::clone(&screen));
-        std::thread::spawn(move || read_loop(&reader, &sink));
+        let outputs = Arc::new(Mutex::new(Some(Vec::new())));
+        let (reader, sink, subs) = (Arc::clone(&pty), Arc::clone(&screen), Arc::clone(&outputs));
+        std::thread::spawn(move || {
+            read_loop(&reader, &sink, &subs);
+            *lock(&subs) = None;
+        });
         Ok(Self {
             pty,
             child: Mutex::new(child),
             screen,
+            outputs,
             pid,
         })
     }
@@ -88,6 +98,16 @@ impl Terminal {
     #[must_use]
     pub fn history(&self, n: usize) -> String {
         lock(&self.screen).history(n)
+    }
+
+    /// The program's raw output from now on, chunk by chunk; the channel closes when the PTY does.
+    #[must_use]
+    pub fn subscribe(&self) -> Receiver<Vec<u8>> {
+        let (tx, rx) = mpsc::channel();
+        if let Some(subs) = lock(&self.outputs).as_mut() {
+            subs.push(tx);
+        }
+        rx
     }
 
     /// Writes raw bytes to the program's input.
@@ -167,8 +187,9 @@ fn pty_size(size: Size) -> pty_process::Size {
     pty_process::Size::new(size.rows.max(1), size.cols.max(1))
 }
 
-/// Feeds PTY output into the screen until the PTY closes (EOF, or EIO once every program left).
-fn read_loop(pty: &pty_process::blocking::Pty, screen: &Mutex<Screen>) {
+/// Feeds PTY output into the screen and the subscribers until the PTY closes (EOF, or EIO once every
+/// program left).
+fn read_loop(pty: &pty_process::blocking::Pty, screen: &Mutex<Screen>, outputs: &Outputs) {
     let mut buf = [0u8; 8192];
     loop {
         match (&*pty).read(&mut buf) {
@@ -179,6 +200,9 @@ fn read_loop(pty: &pty_process::blocking::Pty, screen: &Mutex<Screen>) {
                     screen.feed(&buf[..n]);
                     screen.take_replies()
                 };
+                if let Some(subs) = lock(outputs).as_mut() {
+                    subs.retain(|tx| tx.send(buf[..n].to_vec()).is_ok());
+                }
                 if !replies.is_empty() && (&*pty).write_all(&replies).is_err() {
                     return;
                 }

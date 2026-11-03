@@ -12,9 +12,12 @@ publish.workspace = true
 anyhow.workspace = true
 berth-server.workspace = true
 clap.workspace = true
+rustix = { workspace = true, features = ["termios"] }
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+berth-core.workspace = true
 
 [lints]
 workspace = true

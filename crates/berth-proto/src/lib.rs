@@ -221,11 +221,15 @@ pub enum Method {
     Kill,
     /// Remove an exited terminal: [`Target`] → [`TerminalInfo`].
     Rm,
+    /// Resize a terminal: [`ResizeParams`] → `{}`.
+    Resize,
+    /// Take over a terminal: [`Target`] → [`TerminalInfo`], then the connection streams raw output.
+    Attach,
 }
 
 impl Method {
     /// Every method, in documentation order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::Hello,
         Self::Run,
         Self::Ls,
@@ -235,6 +239,8 @@ impl Method {
         Self::Keys,
         Self::Kill,
         Self::Rm,
+        Self::Resize,
+        Self::Attach,
     ];
 
     /// The wire name.
@@ -250,6 +256,8 @@ impl Method {
             Self::Keys => "keys",
             Self::Kill => "kill",
             Self::Rm => "rm",
+            Self::Resize => "resize",
+            Self::Attach => "attach",
         }
     }
 
@@ -284,6 +292,10 @@ impl Method {
                 "End the terminal's whole process tree (SIGTERM, then SIGKILL); returns the exited terminal."
             }
             Self::Rm => "Remove an exited terminal; returns it as it was.",
+            Self::Resize => "Resize the terminal; the program gets SIGWINCH.",
+            Self::Attach => {
+                "Take over the terminal. After the response the server writes a redraw (clear, then the screen text) and the program's raw output, and closes the connection when the program's PTY closes. The client sends only notifications from then on (`send`, `keys`, `resize`); detaching is closing the connection."
+            }
         }
     }
 }
@@ -364,6 +376,17 @@ pub struct KeysParams {
     pub name: String,
     /// Key names, pressed in order.
     pub keys: Vec<String>,
+}
+
+/// `resize` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResizeParams {
+    /// The terminal's name.
+    pub name: String,
+    /// Rows, at least 1.
+    pub rows: u16,
+    /// Columns, at least 1.
+    pub cols: u16,
 }
 
 /// Whether a terminal's program runs.

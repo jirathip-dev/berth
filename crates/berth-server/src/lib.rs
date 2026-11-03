@@ -9,6 +9,7 @@ mod registry;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufRead as _, BufReader, Write as _};
+use std::net::Shutdown;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 pub use berth_proto as proto;
 use proto::{ErrorCode, Hello, Method, Request, Response, RpcError, Target, VERSION};
-use registry::Registry;
+use registry::{Attached, Registry};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -129,16 +130,29 @@ pub fn serve(paths: &Paths) -> Result<(), Error> {
     Ok(())
 }
 
+/// One connection's state.
+#[derive(Default)]
+struct Session {
+    /// The handshake passed.
+    hello: bool,
+    /// An `attach` just answered: the redraw and the output to stream next.
+    attach: Option<Attached>,
+    /// The connection streams a terminal's output; responses are no longer written.
+    attached: bool,
+}
+
 /// Answers one connection's requests, line by line, until it closes.
 fn connection(registry: &Mutex<Registry>, stream: &UnixStream) {
-    let mut hello = false;
+    let mut session = Session::default();
     let mut out = stream;
     for line in BufReader::new(stream).lines() {
         let Ok(line) = line else { return };
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(response) = respond(registry, &mut hello, &line) {
+        if let Some(response) = respond(registry, &mut session, &line)
+            && !session.attached
+        {
             let Ok(mut bytes) = serde_json::to_vec(&response) else {
                 return;
             };
@@ -147,11 +161,26 @@ fn connection(registry: &Mutex<Registry>, stream: &UnixStream) {
                 return;
             }
         }
+        if let Some((redraw, output)) = session.attach.take() {
+            let Ok(mut out) = stream.try_clone() else {
+                return;
+            };
+            session.attached = true;
+            std::thread::spawn(move || {
+                let _ = out.write_all(&redraw);
+                for chunk in output {
+                    if out.write_all(&chunk).is_err() {
+                        break;
+                    }
+                }
+                let _ = out.shutdown(Shutdown::Both);
+            });
+        }
     }
 }
 
 /// The response to one request line; `None` for a notification.
-fn respond(registry: &Mutex<Registry>, hello: &mut bool, line: &str) -> Option<Response> {
+fn respond(registry: &Mutex<Registry>, session: &mut Session, line: &str) -> Option<Response> {
     let value: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {
@@ -175,7 +204,7 @@ fn respond(registry: &Mutex<Registry>, hello: &mut bool, line: &str) -> Option<R
             ));
         }
     };
-    let result = dispatch(registry, hello, &request);
+    let result = dispatch(registry, session, &request);
     let id = request.id?;
     Some(match result {
         Ok(v) => Response::ok(id, v),
@@ -197,7 +226,7 @@ fn json<T: Serialize>(value: &T) -> Result<Value, RpcError> {
 
 fn dispatch(
     registry: &Mutex<Registry>,
-    hello: &mut bool,
+    session: &mut Session,
     request: &Request,
 ) -> Result<Value, RpcError> {
     let method = Method::parse(&request.method)
@@ -207,12 +236,12 @@ fn dispatch(
         if p.version != VERSION {
             return Err(RpcError::version(&p.version, VERSION));
         }
-        *hello = true;
+        session.hello = true;
         return json(&Hello {
             version: VERSION.to_owned(),
         });
     }
-    if !*hello {
+    if !session.hello {
         return Err(RpcError::new(
             ErrorCode::NoHello,
             "send hello with your version first",
@@ -245,6 +274,14 @@ fn dispatch(
             .keys(&params(request)?)
             .map(|()| Value::Object(serde_json::Map::new())),
         Method::Rm => json(&reg.rm(&params::<Target>(request)?.name)?),
+        Method::Resize => reg
+            .resize(&params(request)?)
+            .map(|()| Value::Object(serde_json::Map::new())),
+        Method::Attach => {
+            let (info, attached) = reg.attach(&params::<Target>(request)?.name)?;
+            session.attach = Some(attached);
+            json(&info)
+        }
         Method::Hello | Method::Kill => Err(RpcError::new(ErrorCode::Internal, "handled above")),
     }
 }
@@ -310,4 +347,23 @@ impl Client {
             (None, None) => Err(Error::BadResponse("neither result nor error".to_owned())),
         }
     }
+
+    /// The connection's reader (with anything it buffered) and writer: after `attach`, the reader
+    /// carries the terminal's output and the writer takes [`notification`]s.
+    #[must_use]
+    pub fn split(self) -> (BufReader<UnixStream>, UnixStream) {
+        (self.reader, self.writer)
+    }
+}
+
+/// One notification line (a request without an id, so no response) for `method` with `params`.
+///
+/// # Errors
+/// [`Error::Json`] when `params` cannot be serialised.
+pub fn notification<P: Serialize>(method: Method, params: &P) -> Result<Vec<u8>, Error> {
+    let mut request = Request::new(0, method, serde_json::to_value(params)?);
+    request.id = None;
+    let mut line = serde_json::to_vec(&request)?;
+    line.push(b'\n');
+    Ok(line)
 }

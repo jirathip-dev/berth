@@ -6,8 +6,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use berth_proto::{
-    ErrorCode, Hello, KeysParams, LsParams, Method, ReadParams, ReadResult, Request, Response,
-    RpcError, RunParams, SendParams, State, Target, TerminalInfo, VERSION,
+    ErrorCode, Hello, KeysParams, LsParams, Method, ReadParams, ReadResult, Request, ResizeParams,
+    Response, RpcError, RunParams, SendParams, State, Target, TerminalInfo, VERSION,
 };
 use serde_json::{Value, json, to_value};
 
@@ -61,7 +61,7 @@ fn example(method: Method) -> (Value, Value) {
             .unwrap(),
             json!([running()]),
         ),
-        Method::Get => (target(), running()),
+        Method::Get | Method::Attach => (target(), running()),
         Method::Read => (
             to_value(ReadParams {
                 name: "build".into(),
@@ -86,6 +86,15 @@ fn example(method: Method) -> (Value, Value) {
             to_value(KeysParams {
                 name: "build".into(),
                 keys: vec!["ctrl+c".into(), "enter".into()],
+            })
+            .unwrap(),
+            json!({}),
+        ),
+        Method::Resize => (
+            to_value(ResizeParams {
+                name: "build".into(),
+                rows: 50,
+                cols: 120,
             })
             .unwrap(),
             json!({}),
@@ -155,7 +164,7 @@ fn method_names_round_trip() {
     for method in Method::ALL {
         assert_eq!(Method::parse(method.name()), Some(method));
     }
-    assert_eq!(Method::parse("attach"), None);
+    assert_eq!(Method::parse("wait"), None);
 }
 
 #[test]

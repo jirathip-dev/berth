@@ -30,6 +30,8 @@ jobs:
         run: just clippy
       - name: test
         run: just test
+      - name: timing report (soft, < 20 ms per non-waiting call)
+        run: just bench
       - name: doc
         run: just doc
       - name: deny (licences, advisories, duplicate versions)

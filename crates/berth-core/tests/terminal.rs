@@ -110,3 +110,20 @@ fn kill_escalates_to_sigkill_after_the_grace_period() {
     assert!(!status.success());
     assert!(!alive(t.pid()));
 }
+
+#[test]
+fn subscribers_get_raw_output_until_the_pty_closes() {
+    let t = sh("read line; printf \"got:$line\\033[1m\\n\"", SIZE);
+    let rx = t.subscribe();
+    t.write(b"x\n").expect("write");
+    let mut out = Vec::new();
+    while let Ok(chunk) = rx.recv_timeout(Duration::from_secs(10)) {
+        out.extend(chunk);
+    }
+    let out = String::from_utf8(out).expect("utf-8");
+    assert!(
+        out.contains("got:x\u{1b}[1m"),
+        "raw bytes, escapes kept: {out:?}"
+    );
+    assert!(t.subscribe().recv().is_err(), "closed once the PTY has");
+}
