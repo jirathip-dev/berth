@@ -3,12 +3,14 @@
 //! No sockets, and no dependency on any other berth crate (CI checks this).
 #![forbid(unsafe_code)]
 
+pub mod history;
 pub mod keys;
 pub mod pattern;
 pub mod proctree;
 pub mod screen;
 pub mod terminal;
 
+pub use history::History;
 pub use pattern::Pattern;
 pub use proctree::Usage;
 pub use screen::{Report, STATES, Screen, Size};

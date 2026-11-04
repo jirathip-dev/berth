@@ -10,12 +10,11 @@ use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, kill_process_group};
 
+use crate::history::{History, Log};
 use crate::proctree::{self, ProcessTable as _, Usage};
 use crate::screen::{Report, Screen, Size};
 use crate::{Error, keys};
 
-/// Lines of scrollback each terminal keeps.
-pub const SCROLLBACK: usize = 10_000;
 /// How soon [`Terminal::wait_until`] looks again for the exit after the PTY closed but before the
 /// program was reaped.
 const REAP: Duration = Duration::from_millis(20);
@@ -88,7 +87,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Terminal {
-    /// Starts `cmd` (program and arguments) in `cwd` on a new PTY of `size`.
+    /// Starts `cmd` (program and arguments) in `cwd` on a new PTY of `size`, with the default
+    /// [`History`] caps and no log.
     ///
     /// The program inherits this process's environment plus `TERM=xterm-256color`, then `env`.
     ///
@@ -106,7 +106,29 @@ impl Terminal {
         K: AsRef<OsStr>,
         V: AsRef<OsStr>,
     {
+        Self::spawn_with(cmd, cwd, env, size, &History::default())
+    }
+
+    /// [`spawn`](Self::spawn) keeping `history`: its caps bound the scrollback, the screen starts from
+    /// the tail of its log, and the output is appended to the log.
+    ///
+    /// # Errors
+    /// As [`spawn`](Self::spawn); [`Error::Io`] when the log cannot be read or opened.
+    pub fn spawn_with<S, K, V>(
+        cmd: &[S],
+        cwd: &Path,
+        env: impl IntoIterator<Item = (K, V)>,
+        size: Size,
+        history: &History,
+    ) -> Result<Self, Error>
+    where
+        S: AsRef<OsStr>,
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
         let (program, args) = cmd.split_first().ok_or(Error::EmptyCommand)?;
+        let screen = Arc::new(Mutex::new(history.restore(size)?));
+        let log = Log::open(history)?;
         let (pty, pts) = pty_process::blocking::open()?;
         pty.resize(pty_size(size))?;
         let child = pty_process::blocking::Command::new(program)
@@ -118,7 +140,6 @@ impl Terminal {
         let pid = i32::try_from(child.id())
             .map_err(|_| Error::Io(std::io::Error::other("pid out of range")))?;
         let pty = Arc::new(pty);
-        let screen = Arc::new(Mutex::new(Screen::new(size, SCROLLBACK)));
         let outputs = Arc::new(Mutex::new(Some(Vec::new())));
         let watch = Arc::new(Watch {
             status: Mutex::new(Status {
@@ -133,7 +154,7 @@ impl Terminal {
         let (reader, sink, subs) = (Arc::clone(&pty), Arc::clone(&screen), Arc::clone(&outputs));
         let watcher = Arc::clone(&watch);
         std::thread::spawn(move || {
-            read_loop(&reader, &sink, &subs, &watcher);
+            read_loop(&reader, &sink, &subs, &watcher, log);
             *lock(&subs) = None;
             watcher.bump(|s| s.closed = true);
         });
@@ -323,13 +344,14 @@ fn pty_size(size: Size) -> pty_process::Size {
     pty_process::Size::new(size.rows.max(1), size.cols.max(1))
 }
 
-/// Feeds PTY output into the screen and the subscribers until the PTY closes (EOF, or EIO once every
-/// program left).
+/// Feeds PTY output into the screen, the subscribers and the log until the PTY closes (EOF, or EIO once
+/// every program left). A log that fails is dropped; the output goes on.
 fn read_loop(
     pty: &pty_process::blocking::Pty,
     screen: &Mutex<Screen>,
     outputs: &Outputs,
     watch: &Watch,
+    mut log: Option<Log>,
 ) {
     let mut buf = [0u8; 8192];
     loop {
@@ -347,6 +369,9 @@ fn read_loop(
                 });
                 if let Some(subs) = lock(outputs).as_mut() {
                     subs.retain(|tx| tx.send(buf[..n].to_vec()).is_ok());
+                }
+                if log.as_mut().is_some_and(|l| l.append(&buf[..n]).is_err()) {
+                    log = None;
                 }
                 if !replies.is_empty() && (&*pty).write_all(&replies).is_err() {
                     return;

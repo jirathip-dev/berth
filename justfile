@@ -27,6 +27,7 @@ deps:
 hygiene:
     scripts/hygiene.sh
 
-# The CLI timing report (soft target: a non-waiting call under 20 ms).
+# The CLI timing report (soft target: a non-waiting call under 20 ms) and the history throughput report.
 bench:
     cargo test -p berth --locked --test cli timing_report -- --nocapture
+    cargo test -p berth-core --locked --test history throughput_report -- --nocapture
