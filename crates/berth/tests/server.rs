@@ -266,7 +266,7 @@ fn a_kept_terminal_comes_back_as_a_shell_in_its_cwd() {
     let run = |client: &mut Client, name: &str, keep: bool| -> TerminalInfo {
         let params = json!({
             "name": name, "labels": {"issue": "7"}, "cwd": work, "keep": keep,
-            "cmd": ["sh", "-c", format!("echo {name} >> ran; exec sleep 100")],
+            "cmd": ["sh", "-c", format!("echo out-{name}; echo {name} >> ran; exec sleep 100")],
         });
         client.call(Method::Run, &params).expect("run")
     };
@@ -285,6 +285,22 @@ fn a_kept_terminal_comes_back_as_a_shell_in_its_cwd() {
         .permissions()
         .mode();
     assert_eq!(state_mode & 0o777, 0o600);
+    let read = |client: &mut Client, name: &str| -> String {
+        let read = ReadParams {
+            name: name.into(),
+            lines: None,
+            history: true,
+        };
+        client
+            .call::<_, ReadResult>(Method::Read, &read)
+            .expect("read")
+            .text
+    };
+    for name in ["kept", "lost"] {
+        eventually("the output", || {
+            read(&mut client, name) == format!("out-{name}")
+        });
+    }
     drop(client);
     drop(server);
 
@@ -297,6 +313,14 @@ fn a_kept_terminal_comes_back_as_a_shell_in_its_cwd() {
     assert_eq!(back.cmd, ["/bin/sh"]);
     assert_eq!((back.cwd, back.labels), (work.clone(), kept.labels));
     assert_ne!(back.pid, kept.pid);
+    eventually("the kept history", || {
+        read(&mut client, "kept").starts_with("out-kept\n")
+    });
+    assert_eq!(
+        read(&mut client, "lost"),
+        "out-lost",
+        "a lost terminal reads its log"
+    );
     let lost: TerminalInfo = client
         .call(Method::Get, &json!({"name": "lost"}))
         .expect("get");

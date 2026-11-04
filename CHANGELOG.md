@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Bounded terminal history: each terminal keeps at most 5,000 lines and 8 MiB of scrollback (was 10,000
+  lines), dropping the oldest whole lines. Raw output is appended to `history/<name>.log` beside the state
+  file, cut back to its last 8 MiB once it passes 16 MiB. After a server restart, `read` of a lost
+  terminal and a kept terminal's new shell start from only the log's last 8 MiB (an incomplete UTF-8
+  character at the cut is skipped). `just bench` also reports the history throughput.
 - Machines over SSH (M3): `berth machine add <name> <ssh-target>`, `ls` and `rm` (kept in `config.toml`
   under `[machines]`), a global `--on <machine>` that runs the terminal commands (including `attach`,
   `wait` and streaming `events`) on that machine through one `ssh <target> berth connect` (key login only:

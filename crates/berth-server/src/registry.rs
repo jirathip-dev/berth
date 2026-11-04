@@ -12,7 +12,7 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use berth_core::proctree::{self, ProcessInfo};
-use berth_core::{Report, STATES, Size, Terminal};
+use berth_core::{History, Report, STATES, Size, Terminal};
 use berth_proto::{
     EmitParams, ErrorCode, EventKind, EventsParams, KeysParams, LsParams, ReadParams, ReadResult,
     Reported, ResizeParams, Resources, RpcError, RunParams, SendParams, State, StateParams,
@@ -98,14 +98,24 @@ fn exit_code(status: ExitStatus) -> Option<i32> {
     status.code().or_else(|| status.signal().map(|s| 128 + s))
 }
 
-/// Starts `cmd` with `$BERTH` set to the terminal's name, so `berth state` inside needs no name.
+/// Terminal `name`'s history: the default caps, and its output log beside the state file at `state`.
+fn history(state: &Path, name: &str) -> History {
+    History {
+        log: Some(state.with_file_name("history").join(format!("{name}.log"))),
+        ..History::default()
+    }
+}
+
+/// Starts `cmd` with `$BERTH` set to the terminal's name, so `berth state` inside needs no name. The
+/// screen starts from the tail of the terminal's log, if any.
 fn spawn(
     cmd: &[String],
     cwd: &Path,
     name: &str,
     idle_after: Option<u64>,
+    history: &History,
 ) -> Result<Terminal, berth_core::Error> {
-    let term = Terminal::spawn(cmd, cwd, [("BERTH", name)], SIZE)?;
+    let term = Terminal::spawn_with(cmd, cwd, [("BERTH", name)], SIZE, history)?;
     term.set_idle_after(idle_after.map(Duration::from_secs));
     Ok(term)
 }
@@ -137,7 +147,8 @@ impl Registry {
             if info.state == State::Running {
                 if info.keep {
                     let cmd = vec![shell.clone()];
-                    term = spawn(&cmd, &info.cwd, &info.name, info.idle_after)
+                    let history = history(path, &info.name);
+                    term = spawn(&cmd, &info.cwd, &info.name, info.idle_after, &history)
                         .ok()
                         .map(Arc::new);
                     if term.is_some() {
@@ -322,7 +333,12 @@ impl Registry {
                 .find(|n| !self.entries.contains_key(n))
                 .unwrap_or_default(),
         };
-        let term = spawn(&p.cmd, &p.cwd, &name, p.idle_after)
+        // A new terminal starts a fresh log.
+        let history = history(&self.path, &name);
+        if let Some(log) = &history.log {
+            let _ = fs::remove_file(log);
+        }
+        let term = spawn(&p.cmd, &p.cwd, &name, p.idle_after, &history)
             .map_err(|e| RpcError::new(ErrorCode::SpawnFailed, format!("{name}: {e}")))?;
         let info = TerminalInfo {
             name: name.clone(),
@@ -362,8 +378,8 @@ impl Registry {
         Ok(self.entry(name)?.view())
     }
 
-    /// `read`: screen or history text, or an ACP terminal's transcript rendered; empty for a terminal
-    /// lost in a restart.
+    /// `read`: screen or history text, or an ACP terminal's transcript rendered; for a terminal lost in
+    /// a restart, from the tail of its log.
     pub(crate) fn read(&self, p: &ReadParams) -> Result<ReadResult, RpcError> {
         let entry = self.entry(&p.name)?;
         if entry.info.acp.is_some() {
@@ -374,20 +390,26 @@ impl Registry {
             let text = lines[lines.len().saturating_sub(n)..].join("\n");
             return Ok(ReadResult { text });
         }
-        let Some(term) = &entry.term else {
-            return Ok(ReadResult {
-                text: String::new(),
-            });
-        };
-        let text = match (p.history, p.lines) {
-            (true, n) => term.history(n.unwrap_or(usize::MAX)),
-            (false, None) => term.screen(),
-            (false, Some(n)) => {
-                let screen = term.screen();
-                let lines: Vec<&str> = screen.lines().collect();
-                lines[lines.len().saturating_sub(n)..].join("\n")
+        let n = p.lines.unwrap_or(usize::MAX);
+        let text = match &entry.term {
+            Some(term) if p.history => term.history(n),
+            Some(term) => term.screen(),
+            None => {
+                let screen = history(&self.path, &p.name)
+                    .restore(SIZE)
+                    .map_err(internal)?;
+                if p.history {
+                    screen.history(n)
+                } else {
+                    screen.text()
+                }
             }
         };
+        if p.history {
+            return Ok(ReadResult { text });
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        let text = lines[lines.len().saturating_sub(n)..].join("\n");
         Ok(ReadResult { text })
     }
 
@@ -504,6 +526,9 @@ impl Registry {
             return Err(RpcError::new(ErrorCode::StillRunning, name));
         }
         let entry = self.entries.remove(name).ok_or_else(|| not_found(name))?;
+        if let Some(log) = history(&self.path, name).log {
+            let _ = fs::remove_file(log);
+        }
         self.saved(entry.info)
     }
 }

@@ -38,9 +38,16 @@ impl Screen {
     /// A blank screen of `size` that keeps at most `scrollback` lines that scrolled off the top.
     #[must_use]
     pub fn new(size: Size, scrollback: usize) -> Self {
+        Self::bounded(size, scrollback, usize::MAX)
+    }
+
+    /// A blank screen of `size` whose scrollback keeps at most `lines` lines and `bytes` bytes of text;
+    /// the oldest whole lines go first, so no UTF-8 character is ever split.
+    #[must_use]
+    pub fn bounded(size: Size, lines: usize, bytes: usize) -> Self {
         Self {
             parser: Parser::new(),
-            grid: Grid::new(size, scrollback),
+            grid: Grid::new(size, (lines, bytes)),
         }
     }
 
@@ -118,7 +125,10 @@ struct Grid {
     bottom: usize,
     saved: (usize, usize),
     history: VecDeque<String>,
-    limit: usize,
+    /// The bytes of text in `history`.
+    history_bytes: usize,
+    /// At most this many lines and bytes of history.
+    limit: (usize, usize),
     /// The primary screen and cursor while the alternate screen is up.
     primary: Option<(Cells, (usize, usize))>,
     replies: Vec<u8>,
@@ -126,7 +136,7 @@ struct Grid {
 }
 
 impl Grid {
-    fn new(size: Size, limit: usize) -> Self {
+    fn new(size: Size, limit: (usize, usize)) -> Self {
         let (rows, cols) = (usize::from(size.rows.max(1)), usize::from(size.cols.max(1)));
         Self {
             rows,
@@ -139,6 +149,7 @@ impl Grid {
             bottom: rows - 1,
             saved: (0, 0),
             history: VecDeque::new(),
+            history_bytes: 0,
             limit,
             primary: None,
             replies: Vec::new(),
@@ -163,12 +174,17 @@ impl Grid {
     }
 
     fn push_history(&mut self, line: String) {
-        if self.primary.is_some() || self.limit == 0 {
+        let (lines, bytes) = self.limit;
+        if self.primary.is_some() || lines == 0 || line.len() > bytes {
             return;
         }
-        if self.history.len() == self.limit {
-            self.history.pop_front();
+        while self.history.len() >= lines || self.history_bytes + line.len() > bytes {
+            let Some(old) = self.history.pop_front() else {
+                break;
+            };
+            self.history_bytes -= old.len();
         }
+        self.history_bytes += line.len();
         self.history.push_back(line);
     }
 
@@ -239,6 +255,7 @@ impl Grid {
                 }
                 if mode == 3 {
                     self.history.clear();
+                    self.history_bytes = 0;
                 }
             }
             _ => {}
@@ -496,6 +513,17 @@ mod tests {
         assert_eq!(s.text(), "5\n6");
         assert_eq!(s.history(100), "2\n3\n4\n5\n6");
         assert_eq!(s.history(2), "5\n6");
+    }
+
+    #[test]
+    fn scrollback_bytes_are_bounded_by_whole_lines() {
+        // "é" is 2 bytes: each history line is 3 bytes, so 7 bytes keep the last 2 lines.
+        let mut s = Screen::bounded(Size { rows: 1, cols: 10 }, 100, 7);
+        s.feed("é1\r\né2\r\né3\r\né4".as_bytes());
+        assert_eq!(s.history(100), "é2\né3\né4");
+        assert_eq!(s.grid.history_bytes, 6);
+        s.feed(b"\x1b[3J");
+        assert_eq!(s.grid.history_bytes, 0);
     }
 
     #[test]

@@ -64,16 +64,16 @@ fn resize_reaches_the_program_and_the_screen() {
 #[test]
 fn scrollback_is_bounded() {
     let t = sh(
-        "i=0; while [ $i -lt 10050 ]; do echo line$i; i=$((i+1)); done; sleep 100",
+        "i=0; while [ $i -lt 5050 ]; do echo line$i; i=$((i+1)); done; sleep 100",
         Size { rows: 5, cols: 20 },
     );
-    eventually("all lines", || t.screen().ends_with("line10049"));
+    eventually("all lines", || t.screen().ends_with("line5049"));
     let history = t.history(usize::MAX);
     let lines: Vec<&str> = history.lines().collect();
-    // 10,000 scrolled-off lines plus the 5 visible rows (the last one blank, under the cursor).
-    assert_eq!(lines.len(), berth_core::terminal::SCROLLBACK + 4);
+    // 5,000 scrolled-off lines plus the 5 visible rows (the last one blank, under the cursor).
+    assert_eq!(lines.len(), berth_core::history::LINES + 4);
     assert_eq!(lines.first(), Some(&"line46"));
-    assert_eq!(t.history(2), "line10048\nline10049");
+    assert_eq!(t.history(2), "line5048\nline5049");
 }
 
 #[test]

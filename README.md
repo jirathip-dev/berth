@@ -51,6 +51,9 @@ around lanes:
 
 **Persistence:** the server keeps PTYs alive while it runs. On server restart, kept terminals come back as shells in
 their last cwd (never re-running a task). State and labels are saved to a small JSON file (atomic writes).
+Each terminal keeps at most 5,000 lines and 8 MiB of scrollback (oldest whole lines go first) and appends its raw
+output to a log beside the state file, kept under 16 MiB; after a restart, `read` and a kept terminal's new shell
+start from only the last 8 MiB of that log.
 
 **The API** is a Unix socket with JSON-RPC (documented schema). The CLI is a thin client. `berth connect` carries the
 protocol over stdin/stdout for SSH.
