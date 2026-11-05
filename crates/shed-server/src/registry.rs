@@ -215,6 +215,7 @@ impl Registry {
             let reported = term.report().map(|r| Reported {
                 state: r.state,
                 note: r.note,
+                state_source: r.source,
             });
             if entry.info.reported != reported {
                 entry.info.reported.clone_from(&reported);
@@ -468,6 +469,7 @@ impl Registry {
         self.live(&p.name)?.set_report(Report {
             state: p.report.state,
             note: p.report.note,
+            source: None,
         });
         self.refresh()?;
         self.get(&p.name)

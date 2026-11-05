@@ -100,6 +100,7 @@ fn done() -> Reported {
     Reported {
         state: "done".into(),
         note: Some("tests pass".into()),
+        state_source: None,
     }
 }
 

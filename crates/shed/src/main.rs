@@ -9,7 +9,8 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
-use std::time::{Duration, Instant};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use clap::{Args, Parser, Subcommand};
@@ -502,6 +503,7 @@ fn send(server: &Server, json: bool, name: String, text: String) -> anyhow::Resu
         let report = Reported {
             state: "working".to_owned(),
             note: None,
+            state_source: None,
         };
         let params = StateParams {
             name: name.clone(),
@@ -627,7 +629,11 @@ fn state(
     };
     let params = StateParams {
         name,
-        report: Reported { state, note },
+        report: Reported {
+            state,
+            note,
+            state_source: None,
+        },
     };
     let info: TerminalInfo = server.connect(None)?.call(Method::State, &params)?;
     print(json, &info, String::new)
@@ -736,8 +742,8 @@ fn connect(paths: &Paths, dir: Option<&Path>, autostart: Option<bool>) -> anyhow
     }
 }
 
-/// Starts `shed serve` in its own process group, detached from this terminal, and waits until it
-/// answers.
+/// Starts `shed serve` in its own process group, detached from this terminal, and waits for its ready
+/// line, racing it against the server exiting and a 10 s timeout.
 fn serve_detached(paths: &Paths, dir: Option<&Path>, sample: Option<f64>) -> anyhow::Result<()> {
     if UnixStream::connect(&paths.socket).is_ok() {
         bail!("a shed server already runs on {}", paths.socket.display());
@@ -753,24 +759,25 @@ fn serve_detached(paths: &Paths, dir: Option<&Path>, sample: Option<f64>) -> any
     let mut child = cmd
         .process_group(0)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .context("starting shed serve")?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while UnixStream::connect(&paths.socket).is_err() {
-        if let Some(status) = child.try_wait()? {
-            bail!("shed serve exited ({status}) before it answered");
-        }
-        if Instant::now() > deadline {
-            bail!(
-                "shed serve did not answer on {} within 5 s",
-                paths.socket.display()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(10));
+    let stdout = child.stdout.take().context("shed serve stdout")?;
+    let (tx, rx) = mpsc::channel();
+    // The line, or an empty one at EOF: the server closed its stdout by exiting.
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = io::BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(line) => match line.trim_end().strip_prefix("shed ready ") {
+            Some(ready) => eprintln!("shed: server {} started", ready.replacen(' ', " on ", 1)),
+            None => bail!("shed serve exited ({}) before it was ready", child.wait()?),
+        },
+        Err(_) => bail!("shed serve was not ready within 10 s (still running, its stdout silent)"),
     }
-    eprintln!("shed: server started on {}", paths.socket.display());
     Ok(())
 }
 

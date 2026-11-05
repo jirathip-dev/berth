@@ -186,7 +186,7 @@ impl Terminal {
         lock(&self.screen).history(n)
     }
 
-    /// The state the program last reported (`shed state` or the OSC 7501 escape). Without one, `idle`
+    /// The state the program last reported (`shed state`, the OSC 7501 escape or another agent's). Without one, `idle`
     /// once the program has been silent for the [`set_idle_after`](Self::set_idle_after) time.
     #[must_use]
     pub fn report(&self) -> Option<Report> {
@@ -196,6 +196,7 @@ impl Terminal {
             idle.then(|| Report {
                 state: "idle".to_owned(),
                 note: None,
+                source: None,
             })
         })
     }

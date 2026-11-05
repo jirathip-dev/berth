@@ -372,7 +372,16 @@ fn run_autostart_starts_a_detached_server() {
         ],
     );
     assert_eq!(stdout(&out), "t1\n");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("server started on"));
+    let socket = dir.join("shed.sock");
+    let started = format!(
+        "server {} on {} started",
+        env!("CARGO_PKG_VERSION"),
+        socket.display()
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(&started),
+        "{out:?}"
+    );
     let mut server = String::new();
     eventually("the server's pid", || {
         server = stdout(&shed_in(&dir, &["read", "t1"])).trim().to_owned();
@@ -385,6 +394,43 @@ fn run_autostart_starts_a_detached_server() {
         killed.success(),
         "the server ({server}) is the program's parent"
     );
+}
+
+#[test]
+fn serve_prints_one_ready_line_once_its_socket_accepts() {
+    let dir = temp_dir("ready");
+    let mut serve = Command::new(SHED)
+        .arg("--dir")
+        .arg(&dir)
+        .arg("serve")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("shed serve");
+    let mut lines = BufReader::new(serve.stdout.take().expect("stdout")).lines();
+    let line = lines.next().expect("a line").expect("utf-8");
+    let socket = dir.join("shed.sock");
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(line, format!("shed ready {version} {}", socket.display()));
+    assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok());
+    serve.kill().expect("kill");
+    assert!(lines.next().is_none(), "exactly one line");
+    let _ = serve.wait();
+}
+
+#[test]
+fn a_server_that_exits_before_it_is_ready_is_reported_as_an_exit() {
+    let dir = temp_dir("early-exit");
+    std::fs::write(dir.join("state.json"), "not json").expect("state");
+    let start = Instant::now();
+    let out = shed_in(&dir, &["serve", "--detach"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("shed serve exited (exit status: 1) before it was ready"),
+        "{err}"
+    );
+    assert!(start.elapsed() < Duration::from_secs(10), "not the timeout");
 }
 
 #[test]

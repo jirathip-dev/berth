@@ -213,8 +213,8 @@ fn sample(registry: &Mutex<Registry>, every: Duration) {
     }
 }
 
-/// Loads the state, binds the socket (mode 0600, its directory 0700) and serves until killed, sampling
-/// each terminal's memory and CPU every `sample_every`.
+/// Loads the state, binds the socket (mode 0600, its directory 0700), prints `shed ready <version>
+/// <socket>` and serves until killed, sampling each terminal's memory and CPU every `sample_every`.
 ///
 /// # Errors
 /// [`Error::AlreadyRunning`] when another server answers on the socket; [`Error::Io`] or
@@ -241,7 +241,12 @@ pub fn serve(paths: &Paths, sample_every: Duration) -> Result<(), Error> {
     }
     let listener = UnixListener::bind(&paths.socket)?;
     fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
-    eprintln!("shed {VERSION}: listening on {}", paths.socket.display());
+    // The one stdout line, `shed ready <version> <socket>`, that a client starting the server waits for.
+    let _ = writeln!(
+        io::stdout(),
+        "shed ready {VERSION} {}",
+        paths.socket.display()
+    );
     for stream in listener.incoming() {
         let stream = stream?;
         let registry = Arc::clone(&registry);

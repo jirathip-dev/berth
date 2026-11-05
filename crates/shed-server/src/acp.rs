@@ -187,6 +187,7 @@ impl Session {
             report: Reported {
                 state: state.to_owned(),
                 note,
+                state_source: None,
             },
         };
         self.call(Method::State, &params);
@@ -476,6 +477,7 @@ pub fn bridge(
         let report = Reported {
             state: "error".to_owned(),
             note: Some(e.to_string()),
+            state_source: None,
         };
         let _: Result<Value, _> = server.call(Method::State, &StateParams { name, report });
     }

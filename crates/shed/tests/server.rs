@@ -467,6 +467,47 @@ fn events_stream_in_seq_order_filter_by_label_and_replay_since() {
     }
 }
 
+#[test]
+fn jan_osc_9999_states_are_reported_with_their_source_and_garbled_ones_ignored() {
+    let dir = temp_dir("jan");
+    let _server = Server::start(&dir);
+    let mut c = Conn::open(&dir);
+    c.result("hello", &json!({"product": "shed", "version": VERSION}));
+    let mut live = Conn::events(&dir, &json!({}));
+    let jan = |state: &str| format!(r#"\033]9999;{{"agentType":"jan","state":"{state}"}}\007"#);
+    let script = format!(
+        "printf 'a{}b'; read x; printf '{}{}{}{}c'; read x",
+        jan("working"),
+        r#"\033]9999;{"agentType":"jan","sta\007"#,
+        r"\033]9999;not json\007",
+        jan("sleeping"),
+        jan("done"),
+    );
+    let params = json!({"name": "jan", "cwd": dir, "cmd": ["sh", "-c", script]});
+    c.result("run", &params);
+    assert_eq!(live.event()["event"], "started");
+    let state = |e: Value| {
+        (
+            e["state"].clone(),
+            e["state_source"].clone(),
+            e["event"].clone(),
+        )
+    };
+    let working = (json!("working"), json!("jan-osc9999"), json!("state"));
+    assert_eq!(state(live.event()), working);
+    c.result("send", &json!({"name": "jan", "text": "\n"}));
+    // The garbled and unknown payloads change nothing: the next state event is `done`.
+    let done = (json!("done"), json!("jan-osc9999"), json!("state"));
+    assert_eq!(state(live.event()), done);
+    let info = c.result("get", &json!({"name": "jan"}));
+    assert_eq!(
+        info["reported"],
+        json!({"state": "done", "state_source": "jan-osc9999"})
+    );
+    let read = c.result("read", &json!({"name": "jan"}));
+    assert_eq!(read["text"], "ab\nc", "no escape reaches the screen");
+}
+
 /// Runs `shed serve` with `home` as `$HOME` (and the XDG dirs under it) until it answers, then kills
 /// it and returns what it logged.
 fn serve(home: &Path) -> String {
