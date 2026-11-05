@@ -7,13 +7,13 @@ version = "0.0.0"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/jirathip-dev/berth"
+repository = "https://github.com/jirathip-dev/shed"
 publish = false
 
 [workspace.dependencies]
-berth-proto = { path = "crates/berth-proto" }
-berth-core = { path = "crates/berth-core" }
-berth-server = { path = "crates/berth-server" }
+shed-proto = { path = "crates/shed-proto" }
+shed-core = { path = "crates/shed-core" }
+shed-server = { path = "crates/shed-server" }
 anyhow = "=1.0.104"
 clap = { version = "=4.6.7", features = ["derive"] }
 pty-process = "=0.5.4"
