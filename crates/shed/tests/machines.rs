@@ -13,8 +13,10 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use common::{Server, temp_dir};
+use serde_json::{Value, json};
 use shed_server::proto::{Response, RpcError};
 
 const SHED: &str = env!("CARGO_BIN_EXE_shed");
@@ -68,13 +70,15 @@ fn script(path: &Path, body: &str) {
 
 /// Two fake hosts under `root`: `user@box.example`, whose `shed` uses the server in `root/remote`,
 /// and `old.example`, whose `shed` answers `hello` as another version would. Returns the `bin`
-/// directory holding the fake `ssh`, which logs its arguments to `bin/ssh.log`.
+/// directory holding the fake `ssh`, which logs its arguments to `bin/ssh.log` and its pids (the
+/// `shed connect` it becomes) to `bin/ssh.pids`.
 fn fake_hosts(root: &Path) -> PathBuf {
     let bin = root.join("bin");
     script(
         &bin.join("ssh"),
         "# A fake ssh: logs its arguments, skips the options, runs the command on the target's PATH.\n\
          echo \"$*\" >> \"$(dirname \"$0\")/ssh.log\"\n\
+         echo $$ >> \"$(dirname \"$0\")/ssh.pids\"\n\
          while [ \"$1\" = -o ]; do shift 2; done\n\
          [ \"$1\" = -- ] && shift\n\
          target=$1\nshift\n\
@@ -196,9 +200,9 @@ fn on_a_machine_run_read_kill_and_ls_reach_the_remote_server_and_versions_must_m
 }
 
 #[test]
-fn events_on_a_machine_stream() {
+fn events_on_a_machine_stream_prefixed_and_reconnect_after_the_link_drops() {
     let root = temp_dir("machine-events");
-    fake_hosts(&root);
+    let bin = fake_hosts(&root);
     let _server = Server::start(&root.join("remote"));
     let added = shed_on(&root, &["machine", "add", "box", "user@box.example"]).output();
     assert!(added.expect("machine add").status.success());
@@ -206,31 +210,58 @@ fn events_on_a_machine_stream() {
         .stdout(Stdio::piped())
         .spawn()
         .expect("events");
+    let mut lines = BufReader::new(events.stdout.take().expect("piped")).lines();
+    let mut next = || -> Value { serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap() };
     let cwd = root.to_str().expect("utf-8 dir");
-    let ran = shed_on(
-        &root,
-        &[
-            "--on", "box", "run", "--name", "e1", "--cwd", cwd, "--", "true",
-        ],
-    )
-    .output()
-    .expect("run");
-    assert!(ran.status.success(), "{ran:?}");
-    let stdout = events.stdout.take().expect("piped");
-    let mut seen = Vec::new();
-    for line in BufReader::new(stdout).lines() {
-        let line = line.expect("an event line");
-        seen.push(line.clone());
-        if line.contains("\"exited\"") && line.contains("\"e1\"") {
-            break;
-        }
+    let run = |name: &str, script: &str| {
+        let args = [
+            "--on", "box", "run", "--name", name, "--cwd", cwd, "--", "sh", "-c", script,
+        ];
+        let ran = shed_on(&root, &args).output().expect("run");
+        assert!(ran.status.success(), "{ran:?}");
+    };
+    run(
+        "e1",
+        "printf '\\033]7501;state=working\\007'; exec sleep 100",
+    );
+    let (started, working) = (next(), next());
+    assert_eq!(
+        (&started["event"], &started["name"]),
+        (&json!("started"), &json!("box/e1"))
+    );
+    assert_eq!(
+        (&working["state"], &working["name"]),
+        (&json!("working"), &json!("box/e1"))
+    );
+
+    // Drop the link: kill every `shed connect` the fake ssh became (the events one is still up).
+    let pids = std::fs::read_to_string(bin.join("ssh.pids")).expect("pids");
+    for pid in pids.lines() {
+        let _ = Command::new("kill").arg(pid).stderr(Stdio::null()).status();
     }
+    let dropped = Instant::now();
+    let reconnecting = next();
+    assert_eq!(reconnecting["name"], "box/e1");
+    assert_eq!(reconnecting["state"], "working");
+    assert_eq!(reconnecting["note"], "machine: reconnecting");
+    assert_eq!(reconnecting["seq"], working["seq"]);
+    let connected = next();
+    assert_eq!(connected["note"], "machine: connected");
+    let waited = dropped.elapsed();
+    assert!(
+        waited >= Duration::from_secs(4) && waited < Duration::from_secs(10),
+        "{waited:?}"
+    );
+
+    // The stream resumes after the last seq: no replay, the next terminal's start comes next.
+    run("e2", "exec sleep 100");
+    let started = next();
+    assert_eq!(
+        (&started["event"], &started["name"]),
+        (&json!("started"), &json!("box/e2"))
+    );
     let _ = events.kill();
     let _ = events.wait();
-    assert!(
-        seen[0].contains("\"started\"") && seen[0].contains("\"e1\""),
-        "{seen:?}"
-    );
 }
 
 #[test]

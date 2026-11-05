@@ -19,6 +19,22 @@ pub struct Size {
 /// The states a program can report (`shed state`, or the OSC 7501 escape).
 pub const STATES: [&str; 4] = ["working", "blocked", "done", "error"];
 
+/// Another agent's states, each with shed's state it stands for.
+type Mapping = &'static [(&'static str, &'static str)];
+
+/// Other agents' state escapes, one row per agent: the OSC number, the source it is noted as, and its
+/// states mapped to shed's. The payload is JSON with a `state` field.
+const FOREIGN: [(&[u8], &str, Mapping); 1] = [(
+    b"9999",
+    "jan-osc9999",
+    &[
+        ("working", "working"),
+        ("blocked", "blocked"),
+        ("waiting", "blocked"),
+        ("done", "done"),
+    ],
+)];
+
 /// A state a program reported, with an optional note.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
@@ -26,6 +42,8 @@ pub struct Report {
     pub state: String,
     /// A free-text note.
     pub note: Option<String>,
+    /// The foreign escape it came from (e.g. `jan-osc9999`); `None` for shed's own.
+    pub source: Option<String>,
 }
 
 /// A VT screen: feed it the program's output and read back plain text.
@@ -61,8 +79,8 @@ impl Screen {
         std::mem::take(&mut self.grid.replies)
     }
 
-    /// Takes the last state the program reported with `ESC ] 7501 ; state=<s>[;note=<n>] BEL` since the
-    /// previous call. The escape never reaches the screen.
+    /// Takes the last state the program reported with `ESC ] 7501 ; state=<s>[;note=<n>] BEL`, or another
+    /// agent's state escape (Jan's OSC 9999), since the previous call. The escape never reaches the screen.
     pub fn take_report(&mut self) -> Option<Report> {
         self.grid.report.take()
     }
@@ -439,10 +457,23 @@ impl Perform for Grid {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        let [b"7501", fields @ ..] = params else {
-            return;
-        };
+        let [code, fields @ ..] = params else { return };
         let text = String::from_utf8_lossy(&fields.join(&b';')).into_owned();
+        if let Some((_, source, states)) = FOREIGN.iter().find(|(c, ..)| c == code) {
+            let json: Option<serde_json::Value> = serde_json::from_str(&text).ok();
+            let state = json.as_ref().and_then(|j| j.get("state")?.as_str());
+            if let Some((_, ours)) = states.iter().find(|(theirs, _)| Some(*theirs) == state) {
+                self.report = Some(Report {
+                    state: (*ours).to_owned(),
+                    note: None,
+                    source: Some((*source).to_owned()),
+                });
+            }
+            return;
+        }
+        if *code != b"7501".as_slice() {
+            return;
+        }
         let (state, note) = match text.split_once(";note=") {
             Some((state, note)) => (state, Some(note.to_owned())),
             None => (text.as_str(), None),
@@ -453,6 +484,7 @@ impl Perform for Grid {
             self.report = Some(Report {
                 state: state.to_owned(),
                 note,
+                source: None,
             });
         }
     }
@@ -552,6 +584,7 @@ mod tests {
         let working = Report {
             state: "working".into(),
             note: None,
+            source: None,
         };
         assert_eq!(s.take_report(), Some(working));
         assert_eq!(s.take_report(), None);
@@ -561,8 +594,23 @@ mod tests {
         let blocked = Report {
             state: "blocked".into(),
             note: Some("needs a; reply".into()),
+            source: None,
         };
         assert_eq!(s.take_report(), Some(blocked));
+    }
+
+    #[test]
+    fn jan_osc_9999_maps_waiting_to_blocked_and_ignores_garbage() {
+        let mut s = screen(
+            3,
+            20,
+            0,
+            "\x1b]9999;{\"agentType\":\"jan\",\"state\":\"waiting\"}\x07",
+        );
+        let report = s.take_report().map(|r| (r.state, r.source));
+        assert_eq!(report, Some(("blocked".into(), Some("jan-osc9999".into()))));
+        s.feed(b"\x1b]9999;{\"state\":\x07\x1b]9999;[1]\x07\x1b]9999;{\"state\":7}\x07x");
+        assert_eq!((s.take_report(), s.text()), (None, "x".into()));
     }
 
     #[test]

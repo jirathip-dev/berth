@@ -270,6 +270,7 @@ version = "0.0.0"
 dependencies = [
  "pty-process",
  "rustix",
+ "serde_json",
  "thiserror",
  "vte",
 ]

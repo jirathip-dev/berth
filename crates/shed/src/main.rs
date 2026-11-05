@@ -3,13 +3,16 @@
 
 mod attach;
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{self, BufRead as _, Write as _};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
-use std::time::{Duration, Instant};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use clap::{Args, Parser, Subcommand};
@@ -19,8 +22,9 @@ use shed_server::acp::{self, Input, Policy};
 use shed_server::agents;
 use shed_server::machines::{self, Machine};
 use shed_server::proto::{
-    EventsParams, KeysParams, LsParams, Method, ReadParams, ReadResult, Reported, RunParams,
-    SendParams, State, StateParams, Target, TerminalInfo, WaitOutcome, WaitParams, WaitResult,
+    Event, EventKind, EventsParams, KeysParams, LsParams, Method, ReadParams, ReadResult, Reported,
+    RunParams, SendParams, State, StateParams, Target, TerminalInfo, WaitOutcome, WaitParams,
+    WaitResult,
 };
 use shed_server::{Client, Paths};
 
@@ -421,7 +425,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 labels: labels.into_iter().collect(),
                 since,
             };
-            events(server.connect(None)?, &params)?;
+            match &server.on {
+                Some(machine) => events_on(&server, machine, params)?,
+                None => events(server.connect(None)?, &params)?,
+            }
         }
         Command::Top => top(&server, json)?,
         Command::Connect { autostart } => relay(&paths, cli.dir.as_deref(), autostart)?,
@@ -502,6 +509,7 @@ fn send(server: &Server, json: bool, name: String, text: String) -> anyhow::Resu
         let report = Reported {
             state: "working".to_owned(),
             note: None,
+            state_source: None,
         };
         let params = StateParams {
             name: name.clone(),
@@ -627,7 +635,11 @@ fn state(
     };
     let params = StateParams {
         name,
-        report: Reported { state, note },
+        report: Reported {
+            state,
+            note,
+            state_source: None,
+        },
     };
     let info: TerminalInfo = server.connect(None)?.call(Method::State, &params)?;
     print(json, &info, String::new)
@@ -670,6 +682,71 @@ fn events(mut client: Client, params: &EventsParams) -> anyhow::Result<()> {
         out.flush()?;
     }
     Ok(())
+}
+
+/// `shed events --on <machine>`: names become `<machine>/<name>`. While a dropped link is retried
+/// ([`machines::keep_up`]), each terminal seen gets a state line noted `machine: reconnecting`, then
+/// `machine: connected` once it is back, and the stream resumes after the last `seq`.
+fn events_on(server: &Server, machine: &Machine, params: EventsParams) -> anyhow::Result<()> {
+    let control = server.paths.socket.parent().unwrap_or(Path::new("."));
+    let print = |event: &Event| -> io::Result<()> {
+        let mut out = io::stdout().lock();
+        writeln!(out, "{}", serde_json::to_string(event)?)?;
+        out.flush()
+    };
+    // The params (`since` follows the stream) and each live terminal's last state (or first) event.
+    let seen = RefCell::new((params, BTreeMap::<String, Event>::new()));
+    let mut broken = None;
+    let session = |mut client: Client| {
+        let _: Value = client.call(Method::Events, &seen.borrow().0)?;
+        for line in client.split().0.lines() {
+            let mut event: Event = serde_json::from_str(&line?)?;
+            event.name = format!("{}/{}", machine.name, event.name);
+            if let Err(e) = print(&event) {
+                broken = Some(e);
+                return Ok(());
+            }
+            let (params, terms) = &mut *seen.borrow_mut();
+            params.since = Some(event.seq);
+            match event.kind {
+                EventKind::Exited { .. } | EventKind::Killed => drop(terms.remove(&event.name)),
+                EventKind::State(_) => drop(terms.insert(event.name.clone(), event)),
+                _ => drop(terms.entry(event.name.clone()).or_insert(event)),
+            }
+        }
+        Err(shed_server::Error::BadResponse(
+            "the link dropped".to_owned(),
+        ))
+    };
+    let status = |reconnecting: bool| {
+        let (params, terms) = &*seen.borrow();
+        let note = if reconnecting {
+            "reconnecting"
+        } else {
+            "connected"
+        };
+        for event in terms.values() {
+            let state = match &event.kind {
+                EventKind::State(r) => r.state.clone(),
+                _ => "idle".to_owned(),
+            };
+            let note = Some(format!("machine: {note}"));
+            let kind = EventKind::State(Reported {
+                state,
+                note,
+                state_source: None,
+            });
+            let seq = params.since.unwrap_or(event.seq);
+            let _ = print(&Event {
+                seq,
+                kind,
+                ..event.clone()
+            });
+        }
+    };
+    let connect = || machines::connect(machine, control, false);
+    machines::keep_up(connect, session, std::thread::sleep, status)?;
+    broken.map_or(Ok(()), |e| Err(e.into()))
 }
 
 /// `shed machine add|ls|rm`.
@@ -736,8 +813,8 @@ fn connect(paths: &Paths, dir: Option<&Path>, autostart: Option<bool>) -> anyhow
     }
 }
 
-/// Starts `shed serve` in its own process group, detached from this terminal, and waits until it
-/// answers.
+/// Starts `shed serve` in its own process group, detached from this terminal, and waits for its ready
+/// line, racing it against the server exiting and a 10 s timeout.
 fn serve_detached(paths: &Paths, dir: Option<&Path>, sample: Option<f64>) -> anyhow::Result<()> {
     if UnixStream::connect(&paths.socket).is_ok() {
         bail!("a shed server already runs on {}", paths.socket.display());
@@ -753,24 +830,25 @@ fn serve_detached(paths: &Paths, dir: Option<&Path>, sample: Option<f64>) -> any
     let mut child = cmd
         .process_group(0)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .context("starting shed serve")?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while UnixStream::connect(&paths.socket).is_err() {
-        if let Some(status) = child.try_wait()? {
-            bail!("shed serve exited ({status}) before it answered");
-        }
-        if Instant::now() > deadline {
-            bail!(
-                "shed serve did not answer on {} within 5 s",
-                paths.socket.display()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(10));
+    let stdout = child.stdout.take().context("shed serve stdout")?;
+    let (tx, rx) = mpsc::channel();
+    // The line, or an empty one at EOF: the server closed its stdout by exiting.
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = io::BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(line) => match line.trim_end().strip_prefix("shed ready ") {
+            Some(ready) => eprintln!("shed: server {} started", ready.replacen(' ', " on ", 1)),
+            None => bail!("shed serve exited ({}) before it was ready", child.wait()?),
+        },
+        Err(_) => bail!("shed serve was not ready within 10 s (still running, its stdout silent)"),
     }
-    eprintln!("shed: server started on {}", paths.socket.display());
     Ok(())
 }
 

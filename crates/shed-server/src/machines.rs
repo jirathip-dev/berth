@@ -19,6 +19,7 @@ use std::os::unix::fs::DirBuilderExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -228,6 +229,49 @@ pub fn connect(machine: &Machine, control_dir: &Path, autostart: bool) -> Result
     }
 }
 
+/// The wait before reconnecting after `failures` failed tries since a link dropped: 5 s for the first
+/// five, then doubling up to 60 s.
+#[must_use]
+pub fn backoff(failures: u32) -> Duration {
+    let secs = if failures < 5 {
+        5
+    } else {
+        5 << (failures - 4).min(4)
+    };
+    Duration::from_secs(secs.min(60))
+}
+
+/// Runs `session` on links from `connect` until one ends `Ok`. A link that drops (`Err`) reports
+/// `status(true)` (reconnecting) and is retried after each [`backoff`] wait, through `sleep`, until
+/// `connect` brings it back, which reports `status(false)`.
+///
+/// # Errors
+/// The first `connect`'s error, and a [`Error::MachineVersion`] at any time.
+pub fn keep_up<L>(
+    mut connect: impl FnMut() -> Result<L, Error>,
+    mut session: impl FnMut(L) -> Result<(), Error>,
+    mut sleep: impl FnMut(Duration),
+    mut status: impl FnMut(bool),
+) -> Result<(), Error> {
+    let mut link = connect()?;
+    loop {
+        if session(link).is_ok() {
+            return Ok(());
+        }
+        status(true);
+        let mut failures = 0;
+        link = loop {
+            sleep(backoff(failures));
+            match connect() {
+                Ok(link) => break link,
+                Err(e @ Error::MachineVersion { .. }) => return Err(e),
+                Err(_) => failures += 1,
+            }
+        };
+        status(false);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +295,38 @@ mod tests {
         assert_eq!(remove(&path, "box").unwrap().target, "user@box.example");
         assert!(matches!(remove(&path, "box"), Err(Error::NoMachine(_))));
         assert_eq!(load(&path).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_dropped_link_reports_reconnecting_and_comes_back_on_the_backoff_schedule() {
+        let secs = |n| backoff(n).as_secs();
+        assert_eq!(
+            (0..10).map(secs).collect::<Vec<_>>(),
+            [5, 5, 5, 5, 5, 10, 20, 40, 60, 60]
+        );
+        // A fake link: up, drops, then 7 failed tries, then up for good.
+        let mut tries = 0;
+        let connect = || {
+            tries += 1;
+            match tries {
+                1 | 9 => Ok(tries),
+                _ => Err(Error::BadResponse("down".into())),
+            }
+        };
+        let session = |link| {
+            if link == 1 {
+                Err(Error::BadResponse("drop".into()))
+            } else {
+                Ok(())
+            }
+        };
+        let (mut slept, mut seen) = (Vec::new(), Vec::new());
+        let status = |reconnecting| seen.push(if reconnecting { "reconnecting" } else { "back" });
+        keep_up(connect, session, |d| slept.push(d.as_secs()), status).unwrap();
+        assert_eq!(seen, ["reconnecting", "back"]);
+        assert_eq!(slept, [5, 5, 5, 5, 5, 10, 20, 40]);
+        let refused = || -> Result<(), _> { Err(Error::BadResponse("down".into())) };
+        assert!(keep_up(refused, |()| Ok(()), |_| panic!("no retry"), |_| {}).is_err());
     }
 
     #[test]

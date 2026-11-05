@@ -466,6 +466,9 @@ pub struct Reported {
     /// A free-text note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The other agent's escape the state came from, e.g. `jan-osc9999`; absent for shed's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_source: Option<String>,
 }
 
 /// `wait` params.
