@@ -1,15 +1,16 @@
-# berth protocol
+# shed protocol
 
-<!-- Generated from crates/berth-proto by `BERTH_BLESS=1 cargo test -p berth-proto`; do not edit. -->
+<!-- Generated from crates/shed-proto by `SHED_BLESS=1 cargo test -p shed-proto`; do not edit. -->
 
 Version: `0.0.0`. Client and server must run the same version.
 
 Newline-delimited [JSON-RPC 2.0](https://www.jsonrpc.org/specification) over a Unix socket, mode 0600:
-`$XDG_RUNTIME_DIR/berth.sock` (macOS: `~/Library/Caches/berth/berth.sock`). One request per line, one
+`$XDG_RUNTIME_DIR/shed.sock` (macOS: `~/Library/Caches/shed/shed.sock`). One request per line, one
 response per line; a request without an `id` is a notification and gets no response.
 
-Every connection starts with `hello`. Any other method first is refused with `NO_HELLO`; a different
-version is refused with `BERTH_VERSION: client x, server y; restart the server`.
+Every connection starts with `hello`. Any other method first is refused with `NO_HELLO`; another
+product or version is refused with `SHED_VERSION: client shed x, server shed y; restart the server`
+(a peer that sends no `product` shows as `unnamed`).
 
 A terminal, as `run`, `ls`, `get`, `kill` and `rm` return it: `state` is `running` or `exited`; `exit` is
 the exit status (128 + N for signal N), `null` while running or when the program was lost in a server
@@ -21,11 +22,11 @@ then); `idle_after` is set when the `idle` fallback is on; `resources` is the pr
 
 ### `hello`
 
-The handshake; must come first on every connection. A different version is refused with `BERTH_VERSION`.
+The handshake; must come first on every connection. Another product or version is refused with `SHED_VERSION`.
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"hello","params":{"version":"0.0.0"}}
-{"jsonrpc":"2.0","id":1,"result":{"version":"0.0.0"}}
+{"jsonrpc":"2.0","id":1,"method":"hello","params":{"product":"shed","version":"0.0.0"}}
+{"jsonrpc":"2.0","id":1,"result":{"product":"shed","version":"0.0.0"}}
 ```
 
 ### `run`
@@ -147,7 +148,7 @@ Stream events. After the response the server writes one event per line (see Even
 
 ### `emit`
 
-Emit one of an ACP terminal's structured events (`turn`, `text`, `tool_call`, `plan`, `mode`, `approval_request`, `approved`, `reply`); its bridge (`berth run --acp`) calls this. Other events are refused.
+Emit one of an ACP terminal's structured events (`turn`, `text`, `tool_call`, `plan`, `mode`, `approval_request`, `approved`, `reply`); its bridge (`shed run --acp`) calls this. Other events are refused.
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"emit","params":{"event":"reply","name":"agent","stop_reason":"end_turn","text":"All 12 tests pass."}}
@@ -158,7 +159,7 @@ Emit one of an ACP terminal's structured events (`turn`, `text`, `tool_call`, `p
 
 An event names its terminal, carries its labels and counts up in `seq`; `event` is `started`, `state` (the reported state changed), `exited` (by itself, with its `code`), `killed` (by `kill`) or `resources` (memory or CPU moved by more than 10 % since the last one).
 
-An ACP terminal (`berth run --acp`) adds its agent's events, emitted by its bridge: `turn` (a prompt), `text` (a reply chunk), `tool_call` (started or changed), `plan`, `mode`, `approval_request` (answer with `berth approve`), `approved` and `reply` (the turn's whole reply and its `stop_reason`).
+An ACP terminal (`shed run --acp`) adds its agent's events, emitted by its bridge: `turn` (a prompt), `text` (a reply chunk), `tool_call` (started or changed), `plan`, `mode`, `approval_request` (answer with `shed approve`), `approved` and `reply` (the turn's whole reply and its `stop_reason`).
 
 ```json
 {"seq":1,"name":"build","labels":{"issue":"7","role":"impl"},"event":"started"}
@@ -187,7 +188,7 @@ An error's `message` starts with its name: `NAME: detail`.
 | -32601 | `NO_SUCH_METHOD` |
 | -32602 | `INVALID_PARAMS` |
 | -32603 | `INTERNAL` |
-| -32000 | `BERTH_VERSION` |
+| -32000 | `SHED_VERSION` |
 | -32001 | `NO_HELLO` |
 | -32002 | `NO_SUCH_TERMINAL` |
 | -32003 | `NAME_TAKEN` |
@@ -195,5 +196,5 @@ An error's `message` starts with its name: `NAME: detail`.
 | -32005 | `SPAWN_FAILED` |
 
 ```json
-{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"BERTH_VERSION: client 0.1.0, server 0.0.0; restart the server"}}
+{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"SHED_VERSION: client 0.1.0, server 0.0.0; restart the server"}}
 ```

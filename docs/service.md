@@ -1,37 +1,37 @@
-# Running berth serve as a user job
+# Running shed serve as a user job
 
-`berth serve` is the per-user server: it owns the terminals, the state file and the socket. Run it as a
-user job so it starts at login and comes back after a crash. berth does not install these files yet (a
+`shed serve` is the per-user server: it owns the terminals, the state file and the socket. Run it as a
+user job so it starts at login and comes back after a crash. shed does not install these files yet (a
 later milestone will); copy them by hand.
 
 | | Socket (mode 0600) | State file (mode 0600) |
 |---|---|---|
-| macOS | `~/Library/Caches/berth/berth.sock` | `~/Library/Application Support/berth/state.json` |
-| Linux | `$XDG_RUNTIME_DIR/berth.sock` | `$XDG_STATE_HOME/berth/state.json` (default `~/.local/state`) |
+| macOS | `~/Library/Caches/shed/shed.sock` | `~/Library/Application Support/shed/state.json` |
+| Linux | `$XDG_RUNTIME_DIR/shed.sock` | `$XDG_STATE_HOME/shed/state.json` (default `~/.local/state`) |
 
-`berth serve --dir DIR` puts both in `DIR` instead. Only one server answers per socket; a second one
+`shed serve --dir DIR` puts both in `DIR` instead. Only one server answers per socket; a second one
 exits with an error.
 
 ## macOS (launchd)
 
-[`dist/launchd/berth.plist`](../dist/launchd/berth.plist): set the binary's absolute path in
+[`dist/launchd/shed.plist`](../dist/launchd/shed.plist): set the binary's absolute path in
 `ProgramArguments` (launchd does not expand `~`), then:
 
 ```sh
-cp dist/launchd/berth.plist ~/Library/LaunchAgents/berth.serve.plist
-launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/berth.serve.plist
-launchctl bootout "gui/$(id -u)/berth.serve"   # stop and unload
+cp dist/launchd/shed.plist ~/Library/LaunchAgents/dev.shed.serve.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/dev.shed.serve.plist
+launchctl bootout "gui/$(id -u)/dev.shed.serve"   # stop and unload
 ```
 
 ## Linux (systemd)
 
-[`dist/systemd/berth.service`](../dist/systemd/berth.service): set `ExecStart` to your binary, then:
+[`dist/systemd/shed.service`](../dist/systemd/shed.service): set `ExecStart` to your binary, then:
 
 ```sh
 mkdir -p ~/.config/systemd/user
-cp dist/systemd/berth.service ~/.config/systemd/user/
+cp dist/systemd/shed.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now berth.service
+systemctl --user enable --now shed.service
 loginctl enable-linger "$USER"   # optional: keep it running while logged out
 ```
 

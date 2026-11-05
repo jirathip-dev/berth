@@ -38,7 +38,7 @@ jobs:
         run: just deny
       - name: line cap (≤ 5,000 non-test lines in crates/*/src)
         run: just cap
-      - name: dependency direction (berth-core has no workspace deps)
+      - name: dependency direction (shed-core has no workspace deps)
         run: just deps
       - name: public hygiene (ci/denylist.txt)
         run: just hygiene

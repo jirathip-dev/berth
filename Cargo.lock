@@ -65,48 +65,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
-name = "berth"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "berth-core",
- "berth-server",
- "clap",
- "rustix",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "berth-core"
-version = "0.0.0"
-dependencies = [
- "pty-process",
- "rustix",
- "thiserror",
- "vte",
-]
-
-[[package]]
-name = "berth-proto"
-version = "0.0.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "berth-server"
-version = "0.0.0"
-dependencies = [
- "berth-core",
- "berth-proto",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -291,6 +249,48 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "shed"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rustix",
+ "serde",
+ "serde_json",
+ "shed-core",
+ "shed-server",
+]
+
+[[package]]
+name = "shed-core"
+version = "0.0.0"
+dependencies = [
+ "pty-process",
+ "rustix",
+ "thiserror",
+ "vte",
+]
+
+[[package]]
+name = "shed-proto"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "shed-server"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "shed-core",
+ "shed-proto",
+ "thiserror",
 ]
 
 [[package]]

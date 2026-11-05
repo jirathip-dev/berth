@@ -1,10 +1,10 @@
-# berth
+# shed
 
 A small runtime that keeps coding-agent terminals alive, reads their screens and reports their state.
-Every lane docks in a berth and keeps running there, across restarts and machines.
+Every lane docks in a shed and keeps running there, across restarts and machines.
 
 > **Status: spec only.** No code yet. Experimental; built to be one runtime option for
-> [herdsman](https://github.com/jirathip-dev/herdsman) (`runtime = "berth"`) next to herdr.
+> [herdsman](https://github.com/jirathip-dev/herdsman) (`runtime = "shed"`) next to herdr.
 
 ## Why
 
@@ -17,14 +17,14 @@ herdsman drives a fleet of coding agents. It needs only a few things from a term
 - list what runs;
 - do the same on another machine over SSH.
 
-herdr does all of this and much more (a full TUI, layouts, plugins). berth is the **small, headless** version, shaped
+herdr does all of this and much more (a full TUI, layouts, plugins). shed is the **small, headless** version, shaped
 around lanes:
 
 - **State is reported, not guessed.** A program reports `working / blocked / done / error` (and an optional note),
-  through a CLI call, the socket or an OSC escape. berth stores and streams it. Screen-scraping is only a fallback.
+  through a CLI call, the socket or an OSC escape. shed stores and streams it. Screen-scraping is only a fallback.
 - **Lanes are first-class.** A terminal carries labels (`fleet`, `issue`, `role`, `round`) and a worktree. List, wait
   and events filter by them.
-- **No UI to keep in sync.** berth draws nothing. herdsman's board is the UI, and any terminal can `attach`.
+- **No UI to keep in sync.** shed draws nothing. herdsman's board is the UI, and any terminal can `attach`.
 - **One version everywhere.** Client and server are the same binary. A mismatch is refused with a clear message
   instead of half-working (herdr's old-server/new-client gap).
 - **Process hygiene built in.** Closing a terminal ends its whole process tree. Per-terminal memory and CPU are
@@ -34,20 +34,20 @@ around lanes:
 
 | Command | What it does |
 |---|---|
-| `berth serve` | The per-user server (launchd/systemd user job). Owns the PTYs, the state and the socket. |
-| `berth run [--name N] [--label k=v…] [--cwd D] [--keep] -- <cmd…>` | Start a terminal. `--keep`: a lost program is replaced by a shell. |
-| `berth ls [--label k=v] [--json]` | List terminals: name, labels, cwd, state, pid tree, RSS/CPU, age. |
-| `berth get <t>` | One terminal as JSON. |
-| `berth read <t> [--lines N] [--screen\|--history]` | The current screen, or scrollback, as plain text. |
-| `berth send <t> <text>` / `berth keys <t> enter esc ctrl+c…` | Type text or press keys. |
-| `berth wait <t> [--until working\|idle\|done\|blocked] [--output RE] [--timeout S]` | Block until the state or output matches. |
-| `berth state <t> working\|blocked\|done\|error [--note TEXT]` | Report state (also via `$BERTH` + OSC 7501-compatible escape). |
-| `berth kill <t>` / `berth rm <t>` | End the process tree; remove a finished terminal. |
-| `berth attach <t>` | Take over the terminal interactively; `Ctrl+\` detaches. |
-| `berth events [--label k=v] [--since N]` | Stream starts, state changes, exits, kills and resource moves as JSON lines; `--since` replays the last 1,000. |
-| `berth top` | The terminals by memory use, largest first. |
-| `berth run --acp <agent>`, `berth agents`, `berth approve`, `berth cancel` | ACP agents as structured terminals; see below. |
-| `berth --on <machine> …` / `berth machine add\|ls\|rm` | The same commands on another host over SSH (key login only). |
+| `shed serve` | The per-user server (launchd/systemd user job). Owns the PTYs, the state and the socket. |
+| `shed run [--name N] [--label k=v…] [--cwd D] [--keep] -- <cmd…>` | Start a terminal. `--keep`: a lost program is replaced by a shell. |
+| `shed ls [--label k=v] [--json]` | List terminals: name, labels, cwd, state, pid tree, RSS/CPU, age. |
+| `shed get <t>` | One terminal as JSON. |
+| `shed read <t> [--lines N] [--screen\|--history]` | The current screen, or scrollback, as plain text. |
+| `shed send <t> <text>` / `shed keys <t> enter esc ctrl+c…` | Type text or press keys. |
+| `shed wait <t> [--until working\|idle\|done\|blocked] [--output RE] [--timeout S]` | Block until the state or output matches. |
+| `shed state <t> working\|blocked\|done\|error [--note TEXT]` | Report state (also via `$SHED` + OSC 7501-compatible escape). |
+| `shed kill <t>` / `shed rm <t>` | End the process tree; remove a finished terminal. |
+| `shed attach <t>` | Take over the terminal interactively; `Ctrl+\` detaches. |
+| `shed events [--label k=v] [--since N]` | Stream starts, state changes, exits, kills and resource moves as JSON lines; `--since` replays the last 1,000. |
+| `shed top` | The terminals by memory use, largest first. |
+| `shed run --acp <agent>`, `shed agents`, `shed approve`, `shed cancel` | ACP agents as structured terminals; see below. |
+| `shed --on <machine> …` / `shed machine add\|ls\|rm` | The same commands on another host over SSH (key login only). |
 
 **Persistence:** the server keeps PTYs alive while it runs. On server restart, kept terminals come back as shells in
 their last cwd (never re-running a task). State and labels are saved to a small JSON file (atomic writes).
@@ -55,7 +55,7 @@ Each terminal keeps at most 5,000 lines and 8 MiB of scrollback (oldest whole li
 output to a log beside the state file, kept under 16 MiB; after a restart, `read` and a kept terminal's new shell
 start from only the last 8 MiB of that log.
 
-**The API** is a Unix socket with JSON-RPC (documented schema). The CLI is a thin client. `berth connect` carries the
+**The API** is a Unix socket with JSON-RPC (documented schema). The CLI is a thin client. `shed connect` carries the
 protocol over stdin/stdout for SSH.
 
 ## Non-goals
@@ -77,47 +77,47 @@ protocol over stdin/stdout for SSH.
 
 Many agents speak the [Agent Client Protocol](https://agentclientprotocol.com) (ACP): prompts, tool calls, approvals and
 the final reply as JSON-RPC messages instead of screen text (an idea from [Codync](https://github.com/leepokai/Codync)).
-berth runs them as a second kind of terminal, through the same API:
+shed runs them as a second kind of terminal, through the same API:
 
 | Command | What it does |
 |---|---|
-| `berth agents` / `berth agents add <id>` / `berth agents rm <id>` | The installed ACP agents. `add` installs the version the [ACP registry](https://agentclientprotocol.com) lists now (its binary, `npx` or `uvx` entry), pinned; nothing upgrades it. |
-| `berth run --acp <id> [--policy allow\|deny\|ask] [--cwd D] [--label k=v…]` | Start the agent's ACP adapter on stdio: `initialize`, `session/new` (no MCP servers). |
-| `berth send <t> <text>` | `session/prompt`; the state is `working` until the turn ends, then `done` (note: the stop reason). |
-| `berth approve <t> <option>` | Answer a permission request (state `blocked`); `--policy` answers them instead. |
-| `berth cancel <t>` / `berth keys <t> esc` | `session/cancel`. |
-| `berth read <t>` | The transcript as text: prompts, one line per tool call, final replies. |
+| `shed agents` / `shed agents add <id>` / `shed agents rm <id>` | The installed ACP agents. `add` installs the version the [ACP registry](https://agentclientprotocol.com) lists now (its binary, `npx` or `uvx` entry), pinned; nothing upgrades it. |
+| `shed run --acp <id> [--policy allow\|deny\|ask] [--cwd D] [--label k=v…]` | Start the agent's ACP adapter on stdio: `initialize`, `session/new` (no MCP servers). |
+| `shed send <t> <text>` | `session/prompt`; the state is `working` until the turn ends, then `done` (note: the stop reason). |
+| `shed approve <t> <option>` | Answer a permission request (state `blocked`); `--policy` answers them instead. |
+| `shed cancel <t>` / `shed keys <t> esc` | `session/cancel`. |
+| `shed read <t>` | The transcript as text: prompts, one line per tool call, final replies. |
 
-`berth events` adds `turn`, `text`, `tool_call`, `plan`, `mode`, `approval_request`, `approved` and `reply`, and
-`berth wait --until done` is exact. The PTY mode stays for agents without ACP. berth never handles provider
+`shed events` adds `turn`, `text`, `tool_call`, `plan`, `mode`, `approval_request`, `approved` and `reply`, and
+`shed wait --until done` is exact. The PTY mode stays for agents without ACP. shed never handles provider
 credentials: each agent logs in its own way. See [docs/acp.md](docs/acp.md), including the Claude adapter caveat.
 
 ## Integration with herdsman
 
-herdsman gets a `runtime = "herdr" | "berth"` setting (see herdsman's runtime spike). Lanes then:
-- run with `berth run --label fleet=… --label issue=… --label role=…`;
-- report state through the harness hook (`berth state … working|done|blocked`);
-- are read with `berth read`;
-- are watched with `berth events` instead of polling.
+herdsman gets a `runtime = "herdr" | "shed"` setting (see herdsman's runtime spike). Lanes then:
+- run with `shed run --label fleet=… --label issue=… --label role=…`;
+- report state through the harness hook (`shed state … working|done|blocked`);
+- are read with `shed read`;
+- are watched with `shed events` instead of polling.
 
 ## Engineering standards (from day one)
 
 ### Repository layout
 
 ```
-berth/
+shed/
 ├── crates/
-│   ├── berth-proto/    # the API types (serde) + JSON-RPC method list; the generated docs/protocol.md comes from here
-│   ├── berth-core/     # terminals, screen model (VT parser), state machine, persistence, process trees; no sockets
-│   ├── berth-server/   # the per-user server: socket, JSON-RPC, events stream, machines over SSH
-│   └── berth/          # the CLI binary (thin client + `berth serve`)
+│   ├── shed-proto/    # the API types (serde) + JSON-RPC method list; the generated docs/protocol.md comes from here
+│   ├── shed-core/     # terminals, screen model (VT parser), state machine, persistence, process trees; no sockets
+│   ├── shed-server/   # the per-user server: socket, JSON-RPC, events stream, machines over SSH
+│   └── shed/          # the CLI binary (thin client + `shed serve`)
 ├── tests/              # end-to-end: real PTYs, a fake agent that reports state
 ├── docs/               # architecture.md, protocol.md, decisions/, cap-history/
 └── xtask/ or justfile  # `just check` runs every CI gate locally
 ```
 
 - **Shipping:** one binary, with a library-first core. The binary crate holds only argument parsing and wiring.
-- **Dependency direction** is enforced in CI (a small `cargo metadata` check): `berth-core` never depends on the server or
+- **Dependency direction** is enforced in CI (a small `cargo metadata` check): `shed-core` never depends on the server or
   CLI crates.
 - `docs/` holds `architecture.md` (one page, with a diagram), `protocol.md` (generated from the types), `decisions/`
   (short ADRs, one per real choice) and `cap-history/`.
@@ -128,7 +128,7 @@ berth/
 - **Lints:** `cargo clippy --all-targets -- -D warnings` with `clippy::pedantic` on. Every `allow` carries a reason,
   at most 10 in the workspace.
 - **No unsafe:** `#![forbid(unsafe_code)]` in every crate, except a single, reviewed PTY module
-  (berth) with a `// SAFETY:` note per block.
+  (shed) with a `// SAFETY:` note per block.
 - **Tests:** `cargo test --workspace` (unit tests next to the code; integration tests in `tests/`; golden files for every
   protocol message and CLI output). New behaviour comes with a test that fails without it.
 - **Dependencies:** `cargo deny check` (licences: MIT/Apache/BSD/ISC only; advisories; no duplicate major versions) and
@@ -167,4 +167,4 @@ berth/
    the socket API, persistence.
 2. **M2, state:** `state`, `wait`, `events`, OSC reporting, the per-terminal resource report.
 3. **M3, machines:** `--on`, `machine add/ls/rm`, `connect`, the same-version check.
-4. **M4, herdsman integration:** the `runtime = "berth"` adapter in herdsman, tried on one fleet.
+4. **M4, herdsman integration:** the `runtime = "shed"` adapter in herdsman, tried on one fleet.
