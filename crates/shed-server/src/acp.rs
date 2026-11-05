@@ -12,6 +12,7 @@ use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -111,6 +112,8 @@ struct Session {
     titles: BTreeMap<String, String>,
     /// The current turn's reply so far.
     reply: String,
+    auth: &'static [&'static str],
+    heard: Instant,
     server: Option<Client>,
     socket: PathBuf,
     name: String,
@@ -189,8 +192,29 @@ impl Session {
         self.call(Method::State, &params);
     }
 
+    /// `auth: <line>` for the first line of `text` with one of the agent's auth-failure patterns.
+    fn auth(&self, text: &str) -> Option<String> {
+        let bad = |l: &&str| self.auth.iter().any(|p| l.contains(p));
+        text.lines().find(bad).map(|l| format!("auth: {l}"))
+    }
+
+    /// Ends the turn as `error` with the note `why`, cancelling it at the agent. An auth failure in
+    /// `why` makes the note `auth: <line>`, after a `reply` with the stop reason `auth_error`.
+    fn fail(&mut self, why: String) -> io::Result<()> {
+        let cancelled = self.input(Input::Cancel);
+        self.prompts.clear();
+        let auth = self.auth(&why);
+        if auth.is_some() {
+            let (text, stop_reason) = (std::mem::take(&mut self.reply), "auth_error".to_owned());
+            self.emit(EventKind::Reply { text, stop_reason });
+        }
+        self.state("error", Some(auth.unwrap_or(why)));
+        cancelled
+    }
+
     /// One framed or typed input.
     fn input(&mut self, input: Input) -> io::Result<()> {
+        self.heard = Instant::now();
         match input {
             Input::Prompt(text) => {
                 self.reply.clear();
@@ -243,15 +267,13 @@ impl Session {
 
     /// One message from the agent.
     fn message(&mut self, m: &Value) -> io::Result<()> {
+        self.heard = Instant::now();
         let text = |v: &Value| v.as_str().unwrap_or_default().to_owned();
         match (m.get("method").and_then(Value::as_str), m.get("id")) {
             (Some("session/request_permission"), Some(id)) => {
                 self.permission(id.clone(), &m["params"])
             }
-            (Some("session/update"), None) => {
-                self.update(&m["params"]["update"]);
-                Ok(())
-            }
+            (Some("session/update"), None) => self.update(&m["params"]["update"]),
             (Some(_), Some(id)) => {
                 let error = json!({"code": -32601, "message": "method not found"});
                 self.send(&json!({"jsonrpc": "2.0", "id": id, "error": error}))
@@ -260,11 +282,10 @@ impl Session {
                 if !id.as_u64().is_some_and(|id| self.prompts.remove(&id)) {
                     return Ok(());
                 }
-                let reply = std::mem::take(&mut self.reply);
                 if let Some(e) = m.get("error") {
-                    self.state("error", Some(text(&e["message"])));
-                    return Ok(());
+                    return self.fail(text(&e["message"]));
                 }
+                let reply = std::mem::take(&mut self.reply);
                 let stop_reason = text(&m["result"]["stopReason"]);
                 self.emit(EventKind::Reply {
                     text: reply,
@@ -277,13 +298,16 @@ impl Session {
         }
     }
 
-    fn update(&mut self, u: &Value) {
+    fn update(&mut self, u: &Value) -> io::Result<()> {
         let text = |v: &Value| v.as_str().map(str::to_owned);
         match u["sessionUpdate"].as_str().unwrap_or_default() {
             "agent_message_chunk" => {
                 if let Some(chunk) = text(&u["content"]["text"]) {
                     self.reply.push_str(&chunk);
                     self.emit(EventKind::Text { text: chunk });
+                    if !self.prompts.is_empty() && self.auth(&self.reply).is_some() {
+                        return self.fail(self.reply.clone());
+                    }
                 }
             }
             "tool_call" | "tool_call_update" => {
@@ -306,6 +330,7 @@ impl Session {
             }
             _ => {}
         }
+        Ok(())
     }
 
     fn permission(&mut self, id: Value, p: &Value) -> io::Result<()> {
@@ -415,6 +440,19 @@ fn read_input(session: &Mutex<Session>) {
     }
 }
 
+/// Ends a turn that heard nothing for `$SHED_TURN_IDLE_TIMEOUT` seconds (default 120) as `error`
+/// (`no response`), but while a permission request waits for `approve`.
+fn watchdog(session: &Mutex<Session>) {
+    let idle = std::env::var("SHED_TURN_IDLE_TIMEOUT").map_or(120, |s| s.parse().unwrap_or(120));
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let mut s = session.lock().unwrap_or_else(PoisonError::into_inner);
+        if !s.prompts.is_empty() && s.asks.is_empty() && s.heard.elapsed().as_secs() >= idle {
+            let _ = s.fail("no response".to_owned());
+        }
+    }
+}
+
 /// Runs the ACP adapter `cmd` in `cwd` for terminal `$SHED` of the server on `socket` (state file
 /// `state`): `initialize`, `session/new` (no MCP servers), then prompts, updates and permission requests
 /// until the agent exits. Returns the agent's exit code.
@@ -430,9 +468,10 @@ pub fn bridge(
     socket: &Path,
     state: &Path,
     policy: Policy,
+    agent_id: &str,
 ) -> Result<i32, Error> {
     let name = std::env::var("SHED").map_err(|_| Error::Acp("$SHED is unset".to_owned()))?;
-    let result = run(cmd, cwd, socket, state, policy, &name);
+    let result = run(cmd, cwd, socket, state, policy, agent_id, &name);
     if let (Err(e), Ok(mut server)) = (&result, Client::connect(socket)) {
         let report = Reported {
             state: "error".to_owned(),
@@ -449,6 +488,7 @@ fn run(
     socket: &Path,
     state: &Path,
     policy: Policy,
+    agent_id: &str,
     name: &str,
 ) -> Result<i32, Error> {
     let path = transcript(state, name);
@@ -486,6 +526,8 @@ fn run(
         asks: VecDeque::new(),
         titles: BTreeMap::new(),
         reply: String::new(),
+        auth: crate::agents::auth_failures(agent_id),
+        heard: Instant::now(),
         server: None,
         socket: socket.to_owned(),
         name: name.to_owned(),
@@ -514,6 +556,8 @@ fn run(
     let session = Arc::new(Mutex::new(session));
     let input = Arc::clone(&session);
     std::thread::spawn(move || read_input(&input));
+    let watched = Arc::clone(&session);
+    std::thread::spawn(move || watchdog(&watched));
     for line in lines {
         let Ok(m) = serde_json::from_str::<Value>(&line?) else {
             continue;

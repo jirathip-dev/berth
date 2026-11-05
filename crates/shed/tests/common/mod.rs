@@ -35,12 +35,18 @@ impl Server {
 
     /// A server that samples resources every `secs` seconds.
     pub fn sampling(dir: &Path, secs: &str) -> Self {
+        Self::with_env(dir, secs, &[])
+    }
+
+    /// A server that samples every `secs` seconds, with `env` in its (and its terminals') environment.
+    pub fn with_env(dir: &Path, secs: &str, env: &[(&str, &str)]) -> Self {
         let child = Command::new(env!("CARGO_BIN_EXE_shed"))
             .args(["serve", "--sample", secs, "--dir"])
             .arg(dir)
             .env("SHELL", "/bin/sh")
             .env("PS1", "$ ")
             .env_remove("ENV")
+            .envs(env.iter().copied())
             .stderr(Stdio::null())
             .spawn()
             .expect("shed serve starts");

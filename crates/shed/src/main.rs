@@ -162,6 +162,8 @@ enum Command {
         state: PathBuf,
         #[arg(long, value_parser = ["allow", "deny", "ask"])]
         policy: String,
+        #[arg(long)]
+        agent: String,
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
@@ -391,8 +393,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             socket,
             state,
             policy,
+            agent,
             cmd,
-        } => return bridge(&cmd, &socket, &state, &policy),
+        } => return bridge(&cmd, &socket, &state, &policy, &agent),
         Command::Keys { name, keys } => {
             let done: Value = server
                 .connect(None)?
@@ -514,7 +517,13 @@ fn send(server: &Server, json: bool, name: String, text: String) -> anyhow::Resu
 }
 
 /// `shed acp-bridge`: the bridge on this terminal, in raw mode; exits with the agent's code.
-fn bridge(cmd: &[String], socket: &Path, state: &Path, policy: &str) -> anyhow::Result<ExitCode> {
+fn bridge(
+    cmd: &[String],
+    socket: &Path,
+    state: &Path,
+    policy: &str,
+    agent: &str,
+) -> anyhow::Result<ExitCode> {
     let policy = match policy {
         "allow" => Policy::Allow,
         "deny" => Policy::Deny,
@@ -522,7 +531,7 @@ fn bridge(cmd: &[String], socket: &Path, state: &Path, policy: &str) -> anyhow::
     };
     let here = std::env::current_dir().context("current directory")?;
     let _raw = attach::RawMode::enter()?;
-    let code = acp::bridge(cmd, &here, socket, state, policy)?;
+    let code = acp::bridge(cmd, &here, socket, state, policy, agent)?;
     Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
 }
 
@@ -553,6 +562,8 @@ fn bridge_cmd(
         path(&paths.state),
         "--policy".to_owned(),
         policy.to_owned(),
+        "--agent".to_owned(),
+        id.to_owned(),
         "--".to_owned(),
     ];
     Ok([bridge.to_vec(), cmd].concat())
