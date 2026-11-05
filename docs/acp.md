@@ -24,7 +24,7 @@ agent: `rm` it and `add` it again.
 ```sh
 shed run --acp claude-acp --label issue=7 --cwd /home/user/project
 shed send t1 "Fix the failing test"
-shed wait t1 --until done blocked
+shed wait t1 --until done blocked error
 shed approve t1 allow-once        # an option id, or a kind: allow_once, reject_once, …
 shed read t1                      # > prompt, [tool] title (status), the final reply
 shed cancel t1                    # or: shed keys t1 esc
@@ -35,7 +35,11 @@ allow or reject option at once; `ask` reports `blocked` (note: the tool) until `
 after `--`, `run --acp <id> -- <cmd…>` runs that command as the adapter instead of the installed one.
 
 The state is `working` from `send` until the turn ends, `blocked` while a permission request waits, and `done`
-(note: the stop reason, e.g. `end_turn` or `cancelled`) after; an agent error is `error`. `shed events`
+(note: the stop reason, e.g. `end_turn` or `cancelled`) after; an agent error is `error`. A turn also
+ends as `error` when the agent's login failed (note `auth: <the line>`, see [Accounts](#accounts)) or when
+it hears nothing from the agent for `$SHED_TURN_IDLE_TIMEOUT` seconds in the environment of `shed serve`
+(default 120; note `no response`). Any update counts, so a long tool call that reports progress goes on;
+a permission request waiting for `approve` does not time out. `shed events`
 streams `turn`, `text` (reply chunks), `tool_call` (each status change), `plan`, `mode`, `approval_request`,
 `approved` and `reply` (the whole reply and its `stop_reason`) next to the usual `started`, `state` and
 `exited`; see [protocol.md](protocol.md).
@@ -61,6 +65,14 @@ control characters replaced, so it cannot drive the reader's terminal. See
 shed passes its environment (the server's, `PATH` included) through to the agent and never handles provider credentials. Each agent logs in
 its own way (its own login command, config file or API key variable); log in once outside shed first.
 
+**An expired login** ends the turn at once: the state is `error` with the note `auth: <the agent's line>`
+(for `claude-acp`, e.g. `auth: Failed to authenticate: OAuth session expired and could not be refreshed`),
+and the `reply` event carries that text with `stop_reason` `auth_error`. To recover, check
+`claude auth status` (`"loggedIn": true`), log in again (`claude auth login`, or `/login` in `claude`), then
+`send` the prompt again; the session needs no restart. The known lines are listed per agent next to the
+registry code (`auth_failures` in `crates/shed-server/src/agents.rs`); another agent's expired login ends
+by the idle timeout instead.
+
 **The Claude adapter** (`claude-acp`, `@agentclientprotocol/claude-agent-acp`) runs Claude Code through the
 Claude Agent SDK, not the interactive `claude` CLI. Whether its usage counts against a Claude subscription plan
 login, or needs an API key, depends on the adapter's login and Anthropic's current terms for the Agent SDK.
@@ -75,7 +87,7 @@ Not run in CI (it needs a real login and network):
    set in the environment of `shed serve`.
 2. `shed run --acp claude-acp --name smoke --cwd <a scratch repo>`.
 3. `shed wait smoke --output "ACP session ready" --timeout 60`, then `shed send smoke "Say hello in one word"`.
-4. `shed wait smoke --until done blocked --timeout 300`; `shed read smoke` shows the reply.
+4. `shed wait smoke --until done blocked error --timeout 300`; `shed read smoke` shows the reply.
 5. The plan's usage page shows the request; nothing is billed to an API key.
 6. `shed kill smoke && shed rm smoke`.
 
@@ -94,7 +106,8 @@ Node 24.22.2, the `claude` CLI 2.1.311 logged in with `claude.ai` on a Max plan.
 - **An expired login hangs the turn.** The first run, before the owner logged in again, got this as reply
   text: `Failed to authenticate: OAuth session expired and could not be refreshed` (plain `claude -p` failed the
   same way). The turn never ended: no `reply` event, so `wait --until done blocked` timed out (exit 124) after
-  300 s. Check `claude auth status` (`"loggedIn": true`) before a run.
+  300 s. Check `claude auth status` (`"loggedIn": true`) before a run. Since #25 this ends the turn as
+  `error` (`auth: …`) instead; see [Accounts](#accounts).
 
 So cooee can talk to Claude through `claude-acp` on the plan login; the `claude -p` stream-json fallback is not
 needed.

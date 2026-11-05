@@ -7,10 +7,14 @@ reason on stderr) on the first that does not fit. Prompts:
 - "tool": a plan, a mode change, a tool call and a permission request; then the tool completes and the
   reply is "wrote notes.txt" (allowed), or it fails and the reply is "denied" (rejected).
 - "slow": one chunk ("thinking"), then waits for session/cancel and stops with `cancelled`.
+- "auth": the expired-login reply of claude-acp 0.100.0, then like "slow" (that adapter never ends it).
+- "silent": nothing, then like "slow".
+- "busy": a tool call with a progress update every 0.3 s for 2.4 s, then the reply "busy done".
 - anything else: the reply "you said: <prompt>".
 """
 import json
 import sys
+import time
 
 SESSION = "sess-1"
 
@@ -113,12 +117,27 @@ def main():
             text = blocks[0]["text"]
             if text == "tool":
                 stop = tool_turn()
-            elif text == "slow":
-                update({"sessionUpdate": "agent_message_chunk",
-                        "content": {"type": "text", "text": "thinking"}})
+            elif text in ("slow", "auth", "silent"):
+                said = {"slow": "thinking", "silent": None, "auth": "Failed to authenticate: "
+                        "OAuth session expired and could not be refreshed"}[text]
+                if said:
+                    update({"sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": said}})
                 while read().get("method") != "session/cancel":
                     pass
                 stop = "cancelled"
+            elif text == "busy":
+                update({"sessionUpdate": "tool_call", "toolCallId": "call-2", "title": "Build",
+                        "status": "in_progress"})
+                for _ in range(8):
+                    time.sleep(0.3)
+                    update({"sessionUpdate": "tool_call_update", "toolCallId": "call-2",
+                            "status": "in_progress"})
+                update({"sessionUpdate": "tool_call_update", "toolCallId": "call-2",
+                        "status": "completed"})
+                update({"sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "busy done"}})
+                stop = "end_turn"
             else:
                 update({"sessionUpdate": "agent_message_chunk",
                         "content": {"type": "text", "text": f"you said: {text}"}})

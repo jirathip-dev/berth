@@ -18,6 +18,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- ACP turns no longer hang: a reply or adapter error with one of the agent's known auth-failure lines (for
+  `claude-acp`: `Failed to authenticate`, `OAuth session expired`) ends the turn as `error`
+  (`auth: <the line>`) after a `reply` with `stop_reason` `auth_error`, and a turn that hears nothing from
+  the agent for `$SHED_TURN_IDLE_TIMEOUT` seconds (default 120; a waiting permission request aside) ends
+  as `error` (`no response`).
 - Bounded terminal history: each terminal keeps at most 5,000 lines and 8 MiB of scrollback (was 10,000
   lines), dropping the oldest whole lines. Raw output is appended to `history/<name>.log` beside the state
   file, cut back to its last 8 MiB once it passes 16 MiB. After a server restart, `read` of a lost

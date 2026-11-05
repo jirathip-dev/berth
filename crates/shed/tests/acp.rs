@@ -358,3 +358,94 @@ fn an_agent_that_fails_the_handshake_reports_error() {
     let err = String::from_utf8_lossy(&missing.stderr);
     assert!(err.contains("ACP agent nope is not installed"), "{err}");
 }
+
+/// Starts the fake agent as terminal `name` (labelled `run=<name>`) under registry id `id`, ready for a
+/// prompt.
+fn start_fake(dir: &Path, name: &str, id: &str) {
+    let agent = fake_agent();
+    let agent = agent.to_str().expect("utf-8");
+    let label = format!("run={name}");
+    let run = ["run", "--name", name, "--label", &label, "--acp", id, "--"];
+    ok(dir, &[&run[..], &["python3", agent]].concat());
+    let ready = [
+        "wait",
+        name,
+        "--output",
+        "ACP session ready",
+        "--timeout",
+        "10",
+    ];
+    ok(dir, &ready);
+}
+
+fn reported(dir: &Path, name: &str) -> Value {
+    let info: Value = serde_json::from_str(&ok(dir, &["get", name])).expect("JSON");
+    info["reported"].clone()
+}
+
+#[test]
+fn an_expired_login_ends_the_turn_as_an_auth_error() {
+    let dir = temp_dir("acp-auth");
+    let _server = Server::start(&dir);
+    start_fake(&dir, "x", "claude-acp");
+    let line = "Failed to authenticate: OAuth session expired and could not be refreshed";
+    let sent = std::time::Instant::now();
+    ok(&dir, &["send", "x", "auth"]);
+    let until = ["wait", "x", "--until", "done", "blocked", "error"];
+    assert_eq!(
+        ok(&dir, &[&until[..], &["--timeout", "10"]].concat()),
+        "x error\n"
+    );
+    let took = sent.elapsed();
+    assert!(took < std::time::Duration::from_secs(1), "took {took:?}");
+    assert_eq!(
+        reported(&dir, "x"),
+        json!({"state": "error", "note": format!("auth: {line}")})
+    );
+    let events = events_until(&dir, "x", |e| e["event"] == "reply");
+    let reply: Value = serde_json::from_str(events.last().expect("a reply")).expect("JSON");
+    assert_eq!(reply["text"], line);
+    assert_eq!(reply["stop_reason"], "auth_error");
+    // The same text from an agent with no auth patterns is an ordinary chunk; the turn goes on.
+    start_fake(&dir, "y", "fake");
+    ok(&dir, &["send", "y", "auth"]);
+    let out = shed(
+        &dir,
+        &["wait", "y", "--until", "done", "error", "--timeout", "1"],
+    );
+    assert_eq!(out.status.code(), Some(124), "{out:?}");
+}
+
+#[test]
+fn the_watchdog_ends_a_silent_turn_but_not_a_busy_one() {
+    let dir = temp_dir("acp-idle");
+    let env = [("SHED_TURN_IDLE_TIMEOUT", "1")];
+    let _server = Server::with_env(&dir, "3600", &env);
+    start_fake(&dir, "w", "fake");
+    let until = [
+        "wait",
+        "w",
+        "--until",
+        "done",
+        "blocked",
+        "error",
+        "--timeout",
+        "10",
+    ];
+    ok(&dir, &["send", "w", "busy"]);
+    assert_eq!(ok(&dir, &until), "w done\n");
+    assert_eq!(
+        reported(&dir, "w"),
+        json!({"state": "done", "note": "end_turn"})
+    );
+    ok(&dir, &["send", "w", "silent"]);
+    assert_eq!(ok(&dir, &until), "w error\n");
+    assert_eq!(
+        reported(&dir, "w"),
+        json!({"state": "error", "note": "no response"})
+    );
+    assert_eq!(
+        ok(&dir, &["read", "w"]),
+        "> busy\n[tool] Build (completed)\nbusy done\n> silent\n"
+    );
+}
