@@ -1,0 +1,4 @@
+    Checking berth-core v0.0.0 (/Users/jkmacmini/.herdr/worktrees/berth/issue-6/crates/berth-core)
+    Checking berth-server v0.0.0 (/Users/jkmacmini/.herdr/worktrees/berth/issue-6/crates/berth-server)
+    Checking berth v0.0.0 (/Users/jkmacmini/.herdr/worktrees/berth/issue-6/crates/berth)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.34s

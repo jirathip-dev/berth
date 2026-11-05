@@ -1,0 +1,115 @@
+   Compiling berth-core v0.0.0 (/Users/jkmacmini/.herdr/worktrees/berth/issue-6/crates/berth-core)
+   Compiling berth-server v0.0.0 (/Users/jkmacmini/.herdr/worktrees/berth/issue-6/crates/berth-server)
+   Compiling berth v0.0.0 (/Users/jkmacmini/.herdr/worktrees/berth/issue-6/crates/berth)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.68s
+     Running unittests src/main.rs (target/debug/deps/berth-11610743de3ecfa3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli.rs (target/debug/deps/cli-5e27870e97f5dee8)
+
+running 10 tests
+test version_flag_prints_the_version ... ok
+test hello_prints_the_version ... ok
+test help_lists_every_command ... ok
+test run_autostart_starts_a_detached_server ... ok
+test run_read_send_exit_ls_and_labels_match_the_golden ... ok
+test timing_report ... ok
+test attach_ends_when_the_program_exits ... ok
+test a_fake_agent_reports_by_escape_and_berth_state_and_wait_returns_on_each ... ok
+test attach_types_resizes_and_detaches_in_a_pty ... ok
+test wait_matches_output_by_pattern_and_falls_back_to_idle ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.38s
+
+     Running tests/server.rs (target/debug/deps/server-4d044336d7ae8df0)
+
+running 3 tests
+test a_version_mismatch_is_refused ... ok
+test a_kept_terminal_comes_back_as_a_shell_in_its_cwd ... ok
+test run_ls_read_kill_over_the_socket_match_the_goldens ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+     Running unittests src/lib.rs (target/debug/deps/berth_core-2e886723d78ee702)
+
+running 15 tests
+test keys::tests::unknown_keys_are_errors ... ok
+test proctree::tests::parses_ps_lines ... ok
+test keys::tests::key_encoding_table ... ok
+test screen::tests::answers_cursor_position_queries ... ok
+test proctree::tests::tree_takes_the_group_descendants_and_known_orphans ... ok
+test screen::tests::cursor_moves_and_erases ... ok
+test proctree::tests::parses_proc_stat ... ok
+test screen::tests::osc_7501_reports_state_and_never_reaches_the_screen ... ok
+test screen::tests::prints_lines_and_drops_trailing_blanks ... ok
+test pattern::tests::rejects_broken_patterns ... ok
+test pattern::tests::matches_the_supported_subset ... ok
+test screen::tests::alternate_screen_keeps_the_primary_and_no_history ... ok
+test screen::tests::resize_moves_rows_into_scrollback ... ok
+test screen::tests::scrollback_is_bounded ... ok
+test screen::tests::wraps_at_the_last_column ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/terminal.rs (target/debug/deps/terminal-f187ba29aebfb710)
+
+running 7 tests
+test subscribers_get_raw_output_until_the_pty_closes ... ok
+test scrollback_is_bounded ... ok
+test reads_printf_output_exactly ... ok
+test kill_ends_the_whole_tree ... ok
+test passes_cwd_env_and_input ... ok
+test resize_reaches_the_program_and_the_screen ... ok
+test kill_escalates_to_sigkill_after_the_grace_period ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
+
+     Running unittests src/lib.rs (target/debug/deps/berth_proto-7648dbd9de0e5f91)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/protocol_doc.rs (target/debug/deps/protocol_doc-15beca9a1556213c)
+
+running 3 tests
+test method_names_round_trip ... ok
+test version_refusal_reads_as_specified ... ok
+test protocol_md_matches_the_types ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/berth_server-60035b5ff70e6305)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/client.rs (target/debug/deps/client-191e439568c0e0ba)
+
+running 1 test
+test a_server_of_another_version_is_refused_by_the_client ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests berth_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests berth_proto
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests berth_server
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
