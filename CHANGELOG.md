@@ -18,6 +18,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Other agents' state escapes: Jan's OSC 9999 (`{"agentType":…,"state":…}`) sets the reported state
+  (`waiting` reads as `blocked`) with `state_source: "jan-osc9999"`; garbled or unknown payloads are
+  ignored. Each agent is one row in one table.
+- `shed events --on <machine>` survives a dropped SSH link: each terminal seen gets a state line noted
+  `machine: reconnecting`, the link is retried every 5 s (backing off to 60 s after 5 failures), a
+  `machine: connected` line follows once it is back, and the stream resumes after the last `seq`. Names in
+  that stream are `<machine>/<name>`.
+- `shed serve` prints one line, `shed ready <version> <socket>`, to stdout once its socket accepts
+  connections (it replaces the `listening on` stderr line). `serve --detach` and `run --autostart` wait for
+  it and say whether the server exited first or was not ready within 10 s.
+
 - ACP turns no longer hang: a reply or adapter error with one of the agent's known auth-failure lines (for
   `claude-acp`: `Failed to authenticate`, `OAuth session expired`) ends the turn as `error`
   (`auth: <the line>`) after a `reply` with `stop_reason` `auth_error`, and a turn that hears nothing from

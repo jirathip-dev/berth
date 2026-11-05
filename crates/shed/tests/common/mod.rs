@@ -47,6 +47,7 @@ impl Server {
             .env("PS1", "$ ")
             .env_remove("ENV")
             .envs(env.iter().copied())
+            .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("shed serve starts");

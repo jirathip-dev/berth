@@ -80,7 +80,7 @@ impl Screen {
     }
 
     /// Takes the last state the program reported with `ESC ] 7501 ; state=<s>[;note=<n>] BEL`, or another
-    /// agent's escape in [`FOREIGN`], since the previous call. The escape never reaches the screen.
+    /// agent's state escape (Jan's OSC 9999), since the previous call. The escape never reaches the screen.
     pub fn take_report(&mut self) -> Option<Report> {
         self.grid.report.take()
     }

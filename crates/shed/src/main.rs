@@ -3,6 +3,8 @@
 
 mod attach;
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{self, BufRead as _, Write as _};
 use std::os::unix::net::UnixStream;
@@ -20,8 +22,9 @@ use shed_server::acp::{self, Input, Policy};
 use shed_server::agents;
 use shed_server::machines::{self, Machine};
 use shed_server::proto::{
-    EventsParams, KeysParams, LsParams, Method, ReadParams, ReadResult, Reported, RunParams,
-    SendParams, State, StateParams, Target, TerminalInfo, WaitOutcome, WaitParams, WaitResult,
+    Event, EventKind, EventsParams, KeysParams, LsParams, Method, ReadParams, ReadResult, Reported,
+    RunParams, SendParams, State, StateParams, Target, TerminalInfo, WaitOutcome, WaitParams,
+    WaitResult,
 };
 use shed_server::{Client, Paths};
 
@@ -422,7 +425,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 labels: labels.into_iter().collect(),
                 since,
             };
-            events(server.connect(None)?, &params)?;
+            match &server.on {
+                Some(machine) => events_on(&server, machine, params)?,
+                None => events(server.connect(None)?, &params)?,
+            }
         }
         Command::Top => top(&server, json)?,
         Command::Connect { autostart } => relay(&paths, cli.dir.as_deref(), autostart)?,
@@ -676,6 +682,71 @@ fn events(mut client: Client, params: &EventsParams) -> anyhow::Result<()> {
         out.flush()?;
     }
     Ok(())
+}
+
+/// `shed events --on <machine>`: names become `<machine>/<name>`. While a dropped link is retried
+/// ([`machines::keep_up`]), each terminal seen gets a state line noted `machine: reconnecting`, then
+/// `machine: connected` once it is back, and the stream resumes after the last `seq`.
+fn events_on(server: &Server, machine: &Machine, params: EventsParams) -> anyhow::Result<()> {
+    let control = server.paths.socket.parent().unwrap_or(Path::new("."));
+    let print = |event: &Event| -> io::Result<()> {
+        let mut out = io::stdout().lock();
+        writeln!(out, "{}", serde_json::to_string(event)?)?;
+        out.flush()
+    };
+    // The params (`since` follows the stream) and each live terminal's last state (or first) event.
+    let seen = RefCell::new((params, BTreeMap::<String, Event>::new()));
+    let mut broken = None;
+    let session = |mut client: Client| {
+        let _: Value = client.call(Method::Events, &seen.borrow().0)?;
+        for line in client.split().0.lines() {
+            let mut event: Event = serde_json::from_str(&line?)?;
+            event.name = format!("{}/{}", machine.name, event.name);
+            if let Err(e) = print(&event) {
+                broken = Some(e);
+                return Ok(());
+            }
+            let (params, terms) = &mut *seen.borrow_mut();
+            params.since = Some(event.seq);
+            match event.kind {
+                EventKind::Exited { .. } | EventKind::Killed => drop(terms.remove(&event.name)),
+                EventKind::State(_) => drop(terms.insert(event.name.clone(), event)),
+                _ => drop(terms.entry(event.name.clone()).or_insert(event)),
+            }
+        }
+        Err(shed_server::Error::BadResponse(
+            "the link dropped".to_owned(),
+        ))
+    };
+    let status = |reconnecting: bool| {
+        let (params, terms) = &*seen.borrow();
+        let note = if reconnecting {
+            "reconnecting"
+        } else {
+            "connected"
+        };
+        for event in terms.values() {
+            let state = match &event.kind {
+                EventKind::State(r) => r.state.clone(),
+                _ => "idle".to_owned(),
+            };
+            let note = Some(format!("machine: {note}"));
+            let kind = EventKind::State(Reported {
+                state,
+                note,
+                state_source: None,
+            });
+            let seq = params.since.unwrap_or(event.seq);
+            let _ = print(&Event {
+                seq,
+                kind,
+                ..event.clone()
+            });
+        }
+    };
+    let connect = || machines::connect(machine, control, false);
+    machines::keep_up(connect, session, std::thread::sleep, status)?;
+    broken.map_or(Ok(()), |e| Err(e.into()))
 }
 
 /// `shed machine add|ls|rm`.
