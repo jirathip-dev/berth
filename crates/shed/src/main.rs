@@ -814,7 +814,15 @@ fn connect(paths: &Paths, dir: Option<&Path>, autostart: Option<bool>) -> anyhow
             ) =>
         {
             if autostart == Some(true) {
-                serve_detached(paths, dir, None)?;
+                let started = serve_detached(paths, dir, None);
+                // A start running at the same time may have won: its server answers within 5 s.
+                for _ in 0..50 {
+                    if let Ok(client) = Client::connect(&paths.socket) {
+                        return Ok(client);
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                started?;
                 return Ok(Client::connect(&paths.socket)?);
             }
             let hint = if autostart.is_some() {

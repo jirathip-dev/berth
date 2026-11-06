@@ -167,6 +167,19 @@ impl Registry {
             }
             entries.insert(info.name.clone(), Entry::new(info, term));
         }
+        // Logs and transcripts of terminals the file no longer names (removed, or lost before a save).
+        for dir in ["history", "acp"] {
+            for file in fs::read_dir(path.with_file_name(dir)).into_iter().flatten() {
+                let Ok(file) = file else { continue };
+                let stem = file
+                    .path()
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned());
+                if stem.is_some_and(|s| !entries.contains_key(&s)) {
+                    let _ = fs::remove_file(file.path());
+                }
+            }
+        }
         let registry = Self {
             entries,
             path: path.to_owned(),
@@ -533,6 +546,105 @@ impl Registry {
         if let Some(log) = history(&self.path, name).log {
             let _ = fs::remove_file(log);
         }
+        let _ = fs::remove_file(crate::acp::transcript(&self.path, name));
         self.saved(entry.info)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("shed-registry-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// R2: the state file each past release wrote (M1; M2's report and idle fallback; M2c's ACP agent;
+    /// #27's state source) loads, and so does one with keys this release does not know.
+    #[test]
+    fn state_files_of_every_past_release_load() {
+        let terminal = |name: &str, extra: &str| {
+            format!(
+                r#"{{"name":"{name}","labels":{{"issue":"7"}},"cwd":"/home/user","cmd":["make"],"keep":false,"state":"exited","exit":0,"pid":null{extra}}}"#
+            )
+        };
+        let terminals = [
+            terminal("m1", ""),
+            terminal(
+                "m2",
+                r#","reported":{"state":"done","note":"ok"},"idle_after":30"#,
+            ),
+            terminal("m2c", r#","acp":"claude-acp""#),
+            terminal(
+                "osc",
+                r#","reported":{"state":"blocked","state_source":"jan-osc9999"}"#,
+            ),
+            terminal(
+                "next",
+                r#","retired_key":true,"reported":{"state":"done","color":"red"}"#,
+            ),
+        ];
+        let path = dir("releases").join("state.json");
+        let file = format!(
+            r#"{{"version":2,"future":[],"terminals":[{}]}}"#,
+            terminals.join(",")
+        );
+        fs::write(&path, file).unwrap();
+        let registry = Registry::load(&path).unwrap();
+        let names: Vec<String> = registry
+            .ls(&LsParams::default())
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, ["m1", "m2", "m2c", "next", "osc"]);
+        assert_eq!(registry.get("m2").unwrap().idle_after, Some(30));
+        assert_eq!(
+            registry.get("m2c").unwrap().acp.as_deref(),
+            Some("claude-acp")
+        );
+        let osc = registry.get("osc").unwrap().reported.unwrap();
+        assert_eq!(osc.state_source.as_deref(), Some("jan-osc9999"));
+    }
+
+    /// R13: a state file that is not JSON stops the load with the reason and is left as it was, never
+    /// replaced by an empty one.
+    #[test]
+    fn a_corrupt_state_file_is_refused_and_kept() {
+        let path = dir("corrupt").join("state.json");
+        fs::write(&path, "{\"version\":1,\"terminals\":[").unwrap();
+        let e = Registry::load(&path).err().expect("refused");
+        assert!(e.to_string().contains("EOF"), "{e}");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{\"version\":1,\"terminals\":["
+        );
+    }
+
+    /// R24: the load removes logs and transcripts no terminal names, and `rm` removes the terminal's.
+    #[test]
+    fn leftovers_go_on_load_and_a_removed_terminal_leaves_nothing() {
+        let root = dir("leftovers");
+        let path = root.join("state.json");
+        let file = r#"{"version":1,"terminals":[{"name":"kept.1","labels":{},"cwd":"/home/user","cmd":["make"],"keep":false,"state":"exited","exit":0,"pid":null}]}"#;
+        fs::write(&path, file).unwrap();
+        let files = [
+            "history/kept.1.log",
+            "acp/kept.1.jsonl",
+            "history/gone.log",
+            "history/gone.log.tmp",
+            "acp/gone.jsonl",
+        ];
+        for f in files {
+            fs::create_dir_all(root.join(f).parent().unwrap()).unwrap();
+            fs::write(root.join(f), "x").unwrap();
+        }
+        let exists = || files.map(|f| root.join(f).exists());
+        let mut registry = Registry::load(&path).unwrap();
+        assert_eq!(exists(), [true, true, false, false, false]);
+        registry.rm("kept.1").unwrap();
+        assert_eq!(exists(), [false; 5]);
     }
 }
