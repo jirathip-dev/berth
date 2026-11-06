@@ -294,18 +294,20 @@ fn example(method: Method) -> (Value, Value) {
         | Method::TerminalKeys
         | Method::TerminalResize
         | Method::ReadOnly => (terminal_params(method), json!({})),
-        Method::MachineStats => (
-            to_value(StatsParams {
-                since: Some(1_762_416_000),
-            })
-            .unwrap(),
-            to_value(MachineStats {
-                now: sample(1_762_416_090),
-                history: vec![sample(1_762_416_060)],
-            })
-            .unwrap(),
-        ),
+        Method::MachineStats => stats_example(),
     }
+}
+
+fn stats_example() -> (Value, Value) {
+    let since = Some(1_762_416_000);
+    let stats = MachineStats {
+        now: sample(1_762_416_090),
+        history: vec![sample(1_762_416_060)],
+    };
+    (
+        to_value(StatsParams { since }).unwrap(),
+        to_value(stats).unwrap(),
+    )
 }
 
 fn sample(at: u64) -> Sample {
