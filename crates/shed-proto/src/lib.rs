@@ -145,11 +145,13 @@ pub enum ErrorCode {
     StillRunning,
     /// The program could not start.
     SpawnFailed,
+    /// The client marked the terminal read-only (`terminal.readonly`): no input, keys or resize.
+    ReadOnly,
 }
 
 impl ErrorCode {
     /// Every code, in documentation order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Parse,
         Self::InvalidRequest,
         Self::MethodNotFound,
@@ -161,6 +163,7 @@ impl ErrorCode {
         Self::NameTaken,
         Self::StillRunning,
         Self::SpawnFailed,
+        Self::ReadOnly,
     ];
 
     /// The numeric JSON-RPC code.
@@ -178,6 +181,7 @@ impl ErrorCode {
             Self::NameTaken => -32003,
             Self::StillRunning => -32004,
             Self::SpawnFailed => -32005,
+            Self::ReadOnly => -32006,
         }
     }
 
@@ -196,6 +200,7 @@ impl ErrorCode {
             Self::NameTaken => "NAME_TAKEN",
             Self::StillRunning => "STILL_RUNNING",
             Self::SpawnFailed => "SPAWN_FAILED",
+            Self::ReadOnly => "READONLY",
         }
     }
 }
@@ -233,11 +238,21 @@ pub enum Method {
     Events,
     /// Emit an ACP terminal's structured event: [`EmitParams`] → `{}`.
     Emit,
+    /// Stream a terminal's screen: [`WatchParams`] → `{}`, then [`ScreenUpdate`] lines.
+    ScreenWatch,
+    /// Type text: [`SendParams`], `terminal` for `name` → `{}`.
+    Input,
+    /// Press keys: [`KeysParams`], `terminal` for `name` → `{}`.
+    TerminalKeys,
+    /// Resize: [`TerminalResizeParams`] → `{}`.
+    TerminalResize,
+    /// Refuse this connection's input to a terminal: [`TerminalParams`] → `{}`.
+    ReadOnly,
 }
 
 impl Method {
     /// Every method, in documentation order.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 20] = [
         Self::Hello,
         Self::Run,
         Self::Ls,
@@ -253,6 +268,11 @@ impl Method {
         Self::Wait,
         Self::Events,
         Self::Emit,
+        Self::ScreenWatch,
+        Self::Input,
+        Self::TerminalKeys,
+        Self::TerminalResize,
+        Self::ReadOnly,
     ];
 
     /// The wire name.
@@ -274,6 +294,11 @@ impl Method {
             Self::Wait => "wait",
             Self::Events => "events",
             Self::Emit => "emit",
+            Self::ScreenWatch => "screen.watch",
+            Self::Input => "terminal.input",
+            Self::TerminalKeys => "terminal.keys",
+            Self::TerminalResize => "terminal.resize",
+            Self::ReadOnly => "terminal.readonly",
         }
     }
 
@@ -323,6 +348,17 @@ impl Method {
             }
             Self::Emit => {
                 "Emit one of an ACP terminal's structured events (`turn`, `text`, `tool_call`, `plan`, `mode`, `approval_request`, `approved`, `reply`); its bridge (`shed run --acp`) calls this. Other events are refused."
+            }
+            Self::ScreenWatch => {
+                "Stream a running terminal's screen. After the response the server writes screen updates (see Screen updates), at most 20 a second: the full screen first (none when `since` is the screen's current `seq`), then the rows that changed. It closes the connection when the program's PTY closes. The connection still takes requests; their responses are not written."
+            }
+            Self::Input => "Type text into the terminal, as `send`.",
+            Self::TerminalKeys => "Press keys by name, as `keys`; `ctrl-x` is `ctrl+x`.",
+            Self::TerminalResize => {
+                "Resize the terminal, as `resize`; without `terminal`, the one this connection watches."
+            }
+            Self::ReadOnly => {
+                "Mark the terminal read-only for this connection: from then on, until it closes, the connection's `send`, `keys`, `resize`, `terminal.input`, `terminal.keys` and `terminal.resize` to the terminal are refused with `READONLY`. The connection may resize only the terminals it has not marked."
             }
         }
     }
@@ -419,19 +455,21 @@ pub struct ReadResult {
     pub text: String,
 }
 
-/// `send` params.
+/// `send` and `terminal.input` params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendParams {
-    /// The terminal's name.
+    /// The terminal's name (`terminal` in `terminal.input`).
+    #[serde(alias = "terminal")]
     pub name: String,
     /// The text, sent as UTF-8.
     pub text: String,
 }
 
-/// `keys` params.
+/// `keys` and `terminal.keys` params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeysParams {
-    /// The terminal's name.
+    /// The terminal's name (`terminal` in `terminal.keys`).
+    #[serde(alias = "terminal")]
     pub name: String,
     /// Key names, pressed in order.
     pub keys: Vec<String>,
@@ -687,4 +725,94 @@ pub struct TerminalInfo {
     /// The ACP agent the program bridges, for an ACP terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp: Option<String>,
+}
+
+/// `screen.watch` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchParams {
+    /// The terminal's name.
+    pub terminal: String,
+    /// The `seq` of the last update the client applied: no full screen first if nothing changed since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+}
+
+/// One `screen.watch` update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenUpdate {
+    /// The screen's change count it shows; pass it as `since` when watching again.
+    pub seq: u64,
+    /// Every row is in `lines` (the first update, and after a resize).
+    pub full: bool,
+    /// Rows.
+    pub rows: u16,
+    /// Columns.
+    pub cols: u16,
+    /// The cursor's row and column, from 0.
+    pub cursor: [u16; 2],
+    /// Lines in scrollback.
+    pub scrollback: usize,
+    /// The rows that changed.
+    pub lines: Vec<Line>,
+}
+
+/// One row of a [`ScreenUpdate`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Line {
+    /// The row, from 0.
+    pub row: u16,
+    /// Its cells, in runs of the same pen; trailing blank default cells dropped.
+    pub runs: Vec<Run>,
+}
+
+/// Consecutive cells with the same pen; `null` colours are the terminal's defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the four SGR attributes are independent flags"
+)]
+pub struct Run {
+    /// The cells' characters.
+    pub text: String,
+    /// Foreground.
+    pub fg: Option<Color>,
+    /// Background.
+    pub bg: Option<Color>,
+    /// Bold.
+    pub bold: bool,
+    /// Italic.
+    pub italic: bool,
+    /// Underline.
+    pub underline: bool,
+    /// Foreground and background swapped.
+    pub inverse: bool,
+}
+
+/// A colour: a palette index (0–15 the named colours, up to 255 the xterm palette) or `[r, g, b]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Color {
+    /// A palette index.
+    Index(u8),
+    /// Red, green, blue.
+    Rgb([u8; 3]),
+}
+
+/// `terminal.resize` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalResizeParams {
+    /// The terminal's name; default the one this connection watches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
+    /// Columns, at least 1.
+    pub cols: u16,
+    /// Rows, at least 1.
+    pub rows: u16,
+}
+
+/// `terminal.readonly` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalParams {
+    /// The terminal's name.
+    pub terminal: String,
 }

@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json, to_value};
 use shed_proto::{
-    ApprovalOption, EmitParams, ErrorCode, Event, EventKind, EventsParams, Hello, KeysParams,
-    LsParams, Method, ReadParams, ReadResult, Reported, Request, ResizeParams, Resources, Response,
-    RpcError, RunParams, SendParams, State, StateParams, Target, TerminalInfo, VERSION,
-    WaitOutcome, WaitParams, WaitResult,
+    ApprovalOption, Color, EmitParams, ErrorCode, Event, EventKind, EventsParams, Hello,
+    KeysParams, Line, LsParams, Method, ReadParams, ReadResult, Reported, Request, ResizeParams,
+    Resources, Response, RpcError, Run, RunParams, ScreenUpdate, SendParams, State, StateParams,
+    Target, TerminalInfo, TerminalParams, TerminalResizeParams, VERSION, WaitOutcome, WaitParams,
+    WaitResult, WatchParams,
 };
 
 fn info(state: State) -> TerminalInfo {
@@ -94,6 +95,57 @@ fn events() -> Vec<Event> {
         kind,
     })
     .collect()
+}
+
+/// A first update of a 2-row screen, then one row changed.
+fn screen_updates() -> [ScreenUpdate; 2] {
+    let plain = |text: &str| Run {
+        text: text.into(),
+        fg: None,
+        bg: None,
+        bold: false,
+        italic: false,
+        underline: false,
+        inverse: false,
+    };
+    let ok = Run {
+        fg: Some(Color::Index(2)),
+        bold: true,
+        ..plain("ok")
+    };
+    let first = ScreenUpdate {
+        seq: 41,
+        full: true,
+        rows: 2,
+        cols: 40,
+        cursor: [1, 2],
+        scrollback: 120,
+        lines: vec![
+            Line {
+                row: 0,
+                runs: vec![ok, plain(" 12 tests")],
+            },
+            Line {
+                row: 1,
+                runs: vec![plain("$")],
+            },
+        ],
+    };
+    let typed = Run {
+        bg: Some(Color::Rgb([40, 40, 40])),
+        ..plain("make")
+    };
+    let next = ScreenUpdate {
+        seq: 44,
+        full: false,
+        cursor: [1, 6],
+        lines: vec![Line {
+            row: 1,
+            runs: vec![plain("$ "), typed],
+        }],
+        ..first.clone()
+    };
+    [first, next]
 }
 
 fn done() -> Reported {
@@ -237,7 +289,35 @@ fn example(method: Method) -> (Value, Value) {
         ),
         Method::Events => (events_params(), json!({})),
         Method::Emit => (emit_params(), json!({})),
+        Method::ScreenWatch
+        | Method::Input
+        | Method::TerminalKeys
+        | Method::TerminalResize
+        | Method::ReadOnly => (terminal_params(method), json!({})),
     }
+}
+
+/// The params of the methods that answer `{}`: `screen.watch` and `terminal.*`.
+fn terminal_params(method: Method) -> Value {
+    match method {
+        Method::ScreenWatch => to_value(WatchParams {
+            terminal: "build".into(),
+            since: Some(41),
+        }),
+        Method::Input => Ok(json!({"terminal": "build", "text": "make lint"})),
+        Method::TerminalKeys => {
+            Ok(json!({"terminal": "build", "keys": ["esc", "ctrl-c", "up", "enter"]}))
+        }
+        Method::TerminalResize => to_value(TerminalResizeParams {
+            terminal: None,
+            cols: 60,
+            rows: 30,
+        }),
+        _ => to_value(TerminalParams {
+            terminal: "agent".into(),
+        }),
+    }
+    .unwrap()
 }
 
 fn line(v: &impl serde::Serialize) -> String {
@@ -285,6 +365,18 @@ fn markdown() -> String {
     );
     for event in events() {
         writeln!(md, "{}", line(&event)).unwrap();
+    }
+    md.push_str("```\n");
+    md.push_str(
+        "\n## Screen updates\n\n`screen.watch` writes one update per line. `seq` is the screen's change count; \
+         `rows`, `cols`, `cursor` (`[row, col]`, from 0) and `scrollback` (lines) are always there; `lines` holds \
+         the rows that changed, each as runs of cells with one pen: `fg` and `bg` (a palette index 0–255, or \
+         `[r, g, b]`; `null` is the default), `bold`, `italic`, `underline` and `inverse`. Trailing blank \
+         default cells are dropped, so a blank row has no runs. `full` marks an update that carries every row: the \
+         first, and the one after a resize.\n\n```json\n",
+    );
+    for update in screen_updates() {
+        writeln!(md, "{}", line(&update)).unwrap();
     }
     md.push_str("```\n");
     md.push_str("\n## Errors\n\nAn error's `message` starts with its name: `NAME: detail`.\n\n");

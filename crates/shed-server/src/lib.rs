@@ -9,7 +9,9 @@ pub mod agents;
 mod events;
 pub mod machines;
 mod registry;
+mod screen;
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
@@ -21,8 +23,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use proto::{
-    ErrorCode, Hello, Method, Request, Response, RpcError, Target, VERSION, WaitOutcome,
-    WaitParams, WaitResult,
+    ErrorCode, Hello, Method, Request, ResizeParams, Response, RpcError, Target, TerminalParams,
+    TerminalResizeParams, VERSION, WaitOutcome, WaitParams, WaitResult, WatchParams,
 };
 use registry::{Registry, Stream};
 use serde::Serialize;
@@ -264,6 +266,19 @@ struct Session {
     stream: Option<Stream>,
     /// The connection streams output or events; responses are no longer written.
     streaming: bool,
+    /// The terminal `screen.watch` streams.
+    watching: Option<String>,
+    /// The terminals `terminal.readonly` marked: their input is refused.
+    readonly: BTreeSet<String>,
+}
+
+/// The terminal a request names (`terminal` or `name`), else the one the connection watches.
+fn target(request: &Request, session: &Session) -> Option<String> {
+    ["terminal", "name"]
+        .into_iter()
+        .find_map(|k| request.params.get(k)?.as_str())
+        .or(session.watching.as_deref())
+        .map(str::to_owned)
 }
 
 /// Answers one connection's requests, line by line, until it closes.
@@ -370,6 +385,18 @@ fn dispatch(
             "send hello with your version first",
         ));
     }
+    let input = matches!(
+        method,
+        Method::Send
+            | Method::Keys
+            | Method::Resize
+            | Method::Input
+            | Method::TerminalKeys
+            | Method::TerminalResize
+    );
+    if input && let Some(name) = target(request, session).filter(|n| session.readonly.contains(n)) {
+        return Err(RpcError::new(ErrorCode::ReadOnly, name));
+    }
     if method == Method::Kill {
         let Target { name } = params(request)?;
         let mut reg = lock(registry);
@@ -399,16 +426,10 @@ fn dispatch(
         Method::Ls => json(&reg.ls(&params(request)?)),
         Method::Get => json(&reg.get(&params::<Target>(request)?.name)?),
         Method::Read => json(&reg.read(&params(request)?)?),
-        Method::Send => reg
-            .send(&params(request)?)
-            .map(|()| Value::Object(serde_json::Map::new())),
-        Method::Keys => reg
-            .keys(&params(request)?)
-            .map(|()| Value::Object(serde_json::Map::new())),
+        Method::Send | Method::Input => reg.send(&params(request)?).map(|()| empty()),
+        Method::Keys | Method::TerminalKeys => reg.keys(&params(request)?).map(|()| empty()),
         Method::Rm => json(&reg.rm(&params::<Target>(request)?.name)?),
-        Method::Resize => reg
-            .resize(&params(request)?)
-            .map(|()| Value::Object(serde_json::Map::new())),
+        Method::Resize => reg.resize(&params(request)?).map(|()| empty()),
         Method::Attach => {
             let (info, attached) = reg.attach(&params::<Target>(request)?.name)?;
             session.stream = Some(attached);
@@ -416,16 +437,43 @@ fn dispatch(
         }
         Method::Events => {
             session.stream = Some(reg.subscribe(params(request)?));
-            Ok(Value::Object(serde_json::Map::new()))
+            Ok(empty())
+        }
+        Method::ScreenWatch => {
+            let p: WatchParams = params(request)?;
+            let term = Arc::clone(reg.live(&p.terminal)?);
+            session.stream = Some((Vec::new(), screen::watch(term, p.since)));
+            session.watching = Some(p.terminal);
+            Ok(empty())
+        }
+        Method::TerminalResize => {
+            let TerminalResizeParams { rows, cols, .. } = params(request)?;
+            let name = target(request, session).ok_or_else(|| {
+                RpcError::new(
+                    ErrorCode::InvalidParams,
+                    "give terminal, or watch one first",
+                )
+            })?;
+            let p = ResizeParams { name, rows, cols };
+            reg.resize(&p).map(|()| empty())
+        }
+        Method::ReadOnly => {
+            let TerminalParams { terminal } = params(request)?;
+            reg.get(&terminal)?;
+            session.readonly.insert(terminal);
+            Ok(empty())
         }
         Method::State => json(&reg.state(params(request)?)?),
-        Method::Emit => reg
-            .emit(params(request)?)
-            .map(|()| Value::Object(serde_json::Map::new())),
+        Method::Emit => reg.emit(params(request)?).map(|()| empty()),
         Method::Hello | Method::Kill | Method::Wait => {
             Err(RpcError::new(ErrorCode::Internal, "handled above"))
         }
     }
+}
+
+/// The `{}` result.
+fn empty() -> Value {
+    Value::Object(serde_json::Map::new())
 }
 
 /// `wait`: blocks this connection, not the registry, until a state or output matches, the program

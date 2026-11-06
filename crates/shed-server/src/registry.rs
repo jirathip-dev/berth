@@ -301,7 +301,8 @@ impl Registry {
         self.entries.get(name).ok_or_else(|| not_found(name))
     }
 
-    fn live(&self, name: &str) -> Result<&Terminal, RpcError> {
+    /// A running terminal.
+    pub(crate) fn live(&self, name: &str) -> Result<&Arc<Terminal>, RpcError> {
         let entry = self.entry(name)?;
         match (&entry.term, entry.info.state) {
             (Some(term), State::Running) => Ok(term),

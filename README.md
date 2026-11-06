@@ -68,7 +68,7 @@ protocol over stdin/stdout for SSH.
 
 ## Constraints
 
-- **Rust, ≤ 5,400 non-test lines in `src/`** (CI-enforced, like herdsman).
+- **Rust, ≤ 5,800 non-test lines in `src/`** (CI-enforced, like herdsman).
 - **Few dependencies:** a PTY crate, a VT parser for the screen, serde/serde_json, clap. No async runtime unless a
   measured need appears.
 - **Fast:** every CLI call that doesn't wait is < 20 ms locally.
@@ -135,7 +135,7 @@ shed/
 - **Dependencies:** `cargo deny check` (licences: MIT/Apache/BSD/ISC only; advisories; no duplicate major versions) and
   a lockfile committed; Dependabot weekly, grouped.
 - **Docs:** `cargo doc --no-deps -D warnings` (every public item documented).
-- **Size:** the line cap check (`≤ 5,400` non-test lines across `crates/*/src`), plus a soft per-PR line budget stated in
+- **Size:** the line cap check (`≤ 5,800` non-test lines across `crates/*/src`), plus a soft per-PR line budget stated in
   the PR.
 - **MSRV:** pinned in `rust-toolchain.toml` and the workspace `rust-version`; CI tests MSRV and stable.
 - **Platforms:** macOS (arm64) and Linux (x86_64, arm64) in the CI matrix.

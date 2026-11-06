@@ -18,6 +18,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `screen.watch {terminal, since}` streams a running terminal's screen: the full screen, then only the
+  rows that changed, as runs of text with their colours, bold, italic, underline and inverse, plus the
+  cursor, the scrollback length and the size; at most 20 updates a second. `terminal.input`,
+  `terminal.keys` (`ctrl-x` works as `ctrl+x`) and `terminal.resize` (the watched terminal by default)
+  send input; `terminal.readonly` makes a terminal read-only for one connection, which then gets
+  `READONLY` for any input, keys or resize to it.
 - `shed install [--force]` writes the per-user job for `shed serve` (macOS: `~/Library/LaunchAgents/dev.shed.serve.plist`,
   RunAtLoad, KeepAlive, a PATH with `~/.cargo/bin` and `~/.local/bin`, logs to `~/Library/Logs/shed.log`;
   Linux: `~/.config/systemd/user/shed.service`) and prints the line that loads it; a file with other contents

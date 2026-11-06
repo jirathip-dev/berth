@@ -12,7 +12,7 @@ use rustix::process::{Pid, Signal, kill_process_group};
 
 use crate::history::{History, Log};
 use crate::proctree::{self, ProcessTable as _, Usage};
-use crate::screen::{Report, Screen, Size};
+use crate::screen::{Report, Screen, Size, Snapshot};
 use crate::{Error, keys};
 
 /// How soon [`Terminal::wait_until`] looks again for the exit after the PTY closed but before the
@@ -180,6 +180,20 @@ impl Terminal {
         lock(&self.screen).text()
     }
 
+    /// The visible screen as runs, with the cursor and the scrollback length, and the
+    /// [`changes`](Self::changes) count it shows.
+    #[must_use]
+    pub fn snapshot(&self) -> (u64, Snapshot) {
+        let screen = lock(&self.screen);
+        (self.changes(), screen.snapshot())
+    }
+
+    /// Counts up on every output chunk, report, resize and PTY close; the screen changes only with it.
+    #[must_use]
+    pub fn changes(&self) -> u64 {
+        lock(&self.watch.status).changes
+    }
+
     /// The last `n` lines of scrollback and screen as plain text.
     #[must_use]
     pub fn history(&self, n: usize) -> String {
@@ -292,6 +306,7 @@ impl Terminal {
         let mut screen = lock(&self.screen);
         self.pty.resize(pty_size(size))?;
         screen.resize(size);
+        self.watch.bump(|_| {});
         Ok(())
     }
 
@@ -359,15 +374,17 @@ fn read_loop(
         match (&*pty).read(&mut buf) {
             Ok(0) => return,
             Ok(n) => {
-                let (replies, report) = {
+                let replies = {
                     let mut screen = lock(screen);
                     screen.feed(&buf[..n]);
-                    (screen.take_replies(), screen.take_report())
+                    let report = screen.take_report();
+                    // Under the screen lock, so a snapshot and its change count agree.
+                    watch.bump(|s| {
+                        s.last_output = Instant::now();
+                        s.report = report.or_else(|| s.report.take());
+                    });
+                    screen.take_replies()
                 };
-                watch.bump(|s| {
-                    s.last_output = Instant::now();
-                    s.report = report.or_else(|| s.report.take());
-                });
                 if let Some(subs) = lock(outputs).as_mut() {
                     subs.retain(|tx| tx.send(buf[..n].to_vec()).is_ok());
                 }

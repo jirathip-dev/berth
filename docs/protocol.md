@@ -155,6 +155,51 @@ Emit one of an ACP terminal's structured events (`turn`, `text`, `tool_call`, `p
 {"jsonrpc":"2.0","id":1,"result":{}}
 ```
 
+### `screen.watch`
+
+Stream a running terminal's screen. After the response the server writes screen updates (see Screen updates), at most 20 a second: the full screen first (none when `since` is the screen's current `seq`), then the rows that changed. It closes the connection when the program's PTY closes. The connection still takes requests; their responses are not written.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"screen.watch","params":{"since":41,"terminal":"build"}}
+{"jsonrpc":"2.0","id":1,"result":{}}
+```
+
+### `terminal.input`
+
+Type text into the terminal, as `send`.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"terminal.input","params":{"terminal":"build","text":"make lint"}}
+{"jsonrpc":"2.0","id":1,"result":{}}
+```
+
+### `terminal.keys`
+
+Press keys by name, as `keys`; `ctrl-x` is `ctrl+x`.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"terminal.keys","params":{"keys":["esc","ctrl-c","up","enter"],"terminal":"build"}}
+{"jsonrpc":"2.0","id":1,"result":{}}
+```
+
+### `terminal.resize`
+
+Resize the terminal, as `resize`; without `terminal`, the one this connection watches.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"terminal.resize","params":{"cols":60,"rows":30}}
+{"jsonrpc":"2.0","id":1,"result":{}}
+```
+
+### `terminal.readonly`
+
+Mark the terminal read-only for this connection: from then on, until it closes, the connection's `send`, `keys`, `resize`, `terminal.input`, `terminal.keys` and `terminal.resize` to the terminal are refused with `READONLY`. The connection may resize only the terminals it has not marked.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"terminal.readonly","params":{"terminal":"agent"}}
+{"jsonrpc":"2.0","id":1,"result":{}}
+```
+
 ## Events
 
 An event names its terminal, carries its labels and counts up in `seq`; `event` is `started`, `state` (the reported state changed), `exited` (by itself, with its `code`), `killed` (by `kill`) or `resources` (memory or CPU moved by more than 10 % since the last one).
@@ -177,6 +222,15 @@ An ACP terminal (`shed run --acp`) adds its agent's events, emitted by its bridg
 {"seq":13,"name":"build","labels":{"issue":"7","role":"impl"},"event":"reply","text":"Fixed; all 12 tests pass.","stop_reason":"end_turn"}
 ```
 
+## Screen updates
+
+`screen.watch` writes one update per line. `seq` is the screen's change count; `rows`, `cols`, `cursor` (`[row, col]`, from 0) and `scrollback` (lines) are always there; `lines` holds the rows that changed, each as runs of cells with one pen: `fg` and `bg` (a palette index 0–255, or `[r, g, b]`; `null` is the default), `bold`, `italic`, `underline` and `inverse`. Trailing blank default cells are dropped, so a blank row has no runs. `full` marks an update that carries every row: the first, and the one after a resize.
+
+```json
+{"seq":41,"full":true,"rows":2,"cols":40,"cursor":[1,2],"scrollback":120,"lines":[{"row":0,"runs":[{"text":"ok","fg":2,"bg":null,"bold":true,"italic":false,"underline":false,"inverse":false},{"text":" 12 tests","fg":null,"bg":null,"bold":false,"italic":false,"underline":false,"inverse":false}]},{"row":1,"runs":[{"text":"$","fg":null,"bg":null,"bold":false,"italic":false,"underline":false,"inverse":false}]}]}
+{"seq":44,"full":false,"rows":2,"cols":40,"cursor":[1,6],"scrollback":120,"lines":[{"row":1,"runs":[{"text":"$ ","fg":null,"bg":null,"bold":false,"italic":false,"underline":false,"inverse":false},{"text":"make","fg":null,"bg":[40,40,40],"bold":false,"italic":false,"underline":false,"inverse":false}]}]}
+```
+
 ## Errors
 
 An error's `message` starts with its name: `NAME: detail`.
@@ -194,6 +248,7 @@ An error's `message` starts with its name: `NAME: detail`.
 | -32003 | `NAME_TAKEN` |
 | -32004 | `STILL_RUNNING` |
 | -32005 | `SPAWN_FAILED` |
+| -32006 | `READONLY` |
 
 ```json
 {"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"SHED_VERSION: client 0.1.0, server 0.0.0; restart the server"}}
