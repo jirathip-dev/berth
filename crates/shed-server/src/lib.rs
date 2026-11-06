@@ -219,11 +219,25 @@ fn sample(registry: &Mutex<Registry>, every: Duration) {
 /// <socket>` and serves until killed, sampling each terminal's memory and CPU every `sample_every`.
 ///
 /// # Errors
-/// [`Error::AlreadyRunning`] when another server answers on the socket; [`Error::Io`] or
+/// [`Error::AlreadyRunning`] when another server answers on the socket or holds the state file; [`Error::Io`] or
 /// [`Error::Json`] when the state file or socket cannot be set up.
 pub fn serve(paths: &Paths, sample_every: Duration) -> Result<(), Error> {
     if UnixStream::connect(&paths.socket).is_ok() {
         return Err(Error::AlreadyRunning(paths.socket.clone()));
+    }
+    // One server per state file, even with its socket gone; the lock ends with the process.
+    if let Some(dir) = paths.state.parent() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+    }
+    let held = fs::File::create(paths.state.with_extension("lock"))?;
+    match held.try_lock() {
+        Err(fs::TryLockError::WouldBlock) => {
+            return Err(Error::AlreadyRunning(paths.socket.clone()));
+        }
+        locked => locked.map_err(io::Error::from)?,
     }
     let registry = Arc::new(Mutex::new(Registry::load(&paths.state)?));
     for term in lock(&registry).running() {
