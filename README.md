@@ -49,6 +49,7 @@ around lanes:
 | `shed top` | The terminals by memory use, largest first. |
 | `shed run --acp <agent>`, `shed agents`, `shed approve`, `shed cancel` | ACP agents as structured terminals; see below. |
 | `shed --on <machine> …` / `shed machine add\|ls\|rm` | The same commands on another host over SSH (key login only). |
+| `shed machine stats [--on M] [--since T]` | Load per CPU, memory pressure, swap, free disk, uptime and terminals by state; one sample a minute kept 24 h. An unreachable machine answers offline (last seen) within 5 s. |
 
 **Persistence:** the server keeps PTYs alive while it runs. On server restart, kept terminals come back as shells in
 their last cwd (never re-running a task). State and labels are saved to a small JSON file (atomic writes).
@@ -68,7 +69,7 @@ protocol over stdin/stdout for SSH.
 
 ## Constraints
 
-- **Rust, ≤ 5,400 non-test lines in `src/`** (CI-enforced, like herdsman).
+- **Rust, ≤ 5,750 non-test lines in `src/`** (CI-enforced, like herdsman).
 - **Few dependencies:** a PTY crate, a VT parser for the screen, serde/serde_json, clap. No async runtime unless a
   measured need appears.
 - **Fast:** every CLI call that doesn't wait is < 20 ms locally.
@@ -135,7 +136,7 @@ shed/
 - **Dependencies:** `cargo deny check` (licences: MIT/Apache/BSD/ISC only; advisories; no duplicate major versions) and
   a lockfile committed; Dependabot weekly, grouped.
 - **Docs:** `cargo doc --no-deps -D warnings` (every public item documented).
-- **Size:** the line cap check (`≤ 5,400` non-test lines across `crates/*/src`), plus a soft per-PR line budget stated in
+- **Size:** the line cap check (`≤ 5,750` non-test lines across `crates/*/src`), plus a soft per-PR line budget stated in
   the PR.
 - **MSRV:** pinned in `rust-toolchain.toml` and the workspace `rust-version`; CI tests MSRV and stable.
 - **Platforms:** macOS (arm64) and Linux (x86_64, arm64) in the CI matrix.

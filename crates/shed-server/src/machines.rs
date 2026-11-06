@@ -19,11 +19,12 @@ use std::os::unix::fs::DirBuilderExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::proto::{ErrorCode, VERSION};
+use crate::proto::{ErrorCode, MachineStats, Method, StatsParams, VERSION};
 use crate::{Client, Error};
 
 /// How long `ssh` may take to connect, in seconds.
@@ -226,6 +227,56 @@ pub fn connect(machine: &Machine, control_dir: &Path, autostart: bool) -> Result
             target: machine.target.clone(),
         }),
         client => client,
+    }
+}
+
+/// How long a machine has to answer `machine.stats` before it counts as offline.
+pub const STATS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A machine that did not answer `machine.stats` within [`STATS_TIMEOUT`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Offline {
+    /// The machine.
+    pub machine: String,
+    /// Always `false`.
+    pub online: bool,
+    /// When it last answered (unix seconds); `None` if never.
+    pub last_seen: Option<u64>,
+}
+
+/// `machine.stats` on `machine` ([`connect`]), or [`Offline`] when it gives no answer within
+/// [`STATS_TIMEOUT`], however `ssh` hangs. Each answer's time is kept in `seen_dir`.
+///
+/// # Errors
+/// [`Error::MachineVersion`] when the shed there is another version.
+pub fn stats(
+    machine: &Machine,
+    control_dir: &Path,
+    seen_dir: &Path,
+    params: StatsParams,
+) -> Result<Result<MachineStats, Offline>, Error> {
+    let (tx, rx) = mpsc::channel();
+    let (m, dir) = (machine.clone(), control_dir.to_owned());
+    std::thread::spawn(move || {
+        let _ = tx
+            .send(connect(&m, &dir, false).and_then(|mut c| c.call(Method::MachineStats, &params)));
+    });
+    let seen = seen_dir.join(&machine.name);
+    match rx.recv_timeout(STATS_TIMEOUT) {
+        Ok(Ok(stats)) => {
+            // Best effort: without it a later offline answer says never seen.
+            let _ = fs::create_dir_all(seen_dir);
+            let _ = fs::write(&seen, crate::stats::unix_now().to_string());
+            Ok(Ok(stats))
+        }
+        Ok(Err(e @ Error::MachineVersion { .. })) => Err(e),
+        _ => Ok(Err(Offline {
+            machine: machine.name.clone(),
+            online: false,
+            last_seen: fs::read_to_string(&seen)
+                .ok()
+                .and_then(|t| t.trim().parse().ok()),
+        })),
     }
 }
 

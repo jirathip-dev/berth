@@ -15,12 +15,13 @@ use serde::{Deserialize, Serialize};
 use shed_core::proctree::{self, ProcessInfo};
 use shed_core::{History, Report, STATES, Size, Terminal};
 use shed_proto::{
-    EmitParams, ErrorCode, EventKind, EventsParams, KeysParams, LsParams, ReadParams, ReadResult,
-    Reported, ResizeParams, Resources, RpcError, RunParams, SendParams, State, StateParams,
-    TerminalInfo,
+    EmitParams, ErrorCode, EventKind, EventsParams, KeysParams, LsParams, MachineStats, ReadParams,
+    ReadResult, Reported, ResizeParams, Resources, RpcError, RunParams, Sample, SendParams, State,
+    StateParams, TerminalInfo,
 };
 
 use crate::events::Events;
+use crate::stats::Stats;
 
 /// The size new terminals start at.
 const SIZE: Size = Size { rows: 24, cols: 80 };
@@ -79,6 +80,8 @@ pub(crate) struct Registry {
     entries: BTreeMap<String, Entry>,
     path: PathBuf,
     events: Events,
+    /// The machine samples kept for `machine.stats`.
+    pub(crate) stats: Stats,
 }
 
 fn not_found(name: &str) -> RpcError {
@@ -171,6 +174,7 @@ impl Registry {
             entries,
             path: path.to_owned(),
             events,
+            stats: Stats::load(&path.with_file_name("stats.json")),
         };
         registry.save()?;
         Ok(registry)
@@ -281,6 +285,38 @@ impl Registry {
                 self.events.emit(name, labels, EventKind::Resources(now));
             }
         }
+    }
+
+    /// The state file's directory.
+    pub(crate) fn dir(&self) -> PathBuf {
+        self.path.parent().unwrap_or(Path::new(".")).to_owned()
+    }
+
+    /// Terminals by state: the reported state while running, else `running`; `exited`.
+    fn counts(&self) -> BTreeMap<String, u64> {
+        let mut counts = BTreeMap::new();
+        for e in self.entries.values() {
+            let state = match (e.info.state, &e.info.reported) {
+                (State::Exited, _) => "exited",
+                (State::Running, Some(r)) => &r.state,
+                (State::Running, None) => "running",
+            };
+            *counts.entry(state.to_owned()).or_default() += 1;
+        }
+        counts
+    }
+
+    /// Keeps `sample` with the terminal counts.
+    pub(crate) fn record(&mut self, mut sample: Sample) {
+        sample.terminals = self.counts();
+        self.stats.push(sample);
+    }
+
+    /// `machine.stats`: `now` with the terminal counts, and the kept samples after `since`.
+    pub(crate) fn machine_stats(&self, mut now: Sample, since: Option<u64>) -> MachineStats {
+        now.terminals = self.counts();
+        let history = since.map(|t| self.stats.since(t)).unwrap_or_default();
+        MachineStats { now, history }
     }
 
     /// `events`: the replay and the stream.
