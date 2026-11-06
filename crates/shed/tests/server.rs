@@ -671,7 +671,10 @@ fn screen_watch_sends_the_full_screen_then_diffs_and_since_skips_the_full_one() 
         .iter()
         .find(|l| l["row"] == 1)
         .expect("row 1")["runs"][0];
-    assert_eq!(red, &json!({"text": "red", "fg": 1, "bold": true}));
+    assert_eq!(
+        red,
+        &json!({"text": "red", "fg": 1, "bg": null, "bold": true, "italic": false, "underline": false, "inverse": false})
+    );
 
     // Once the screen is still, watching again from the last seq sends no full screen first.
     eventually("the prompt after the output", || {
