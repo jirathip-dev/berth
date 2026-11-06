@@ -18,6 +18,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `shed install [--force]` writes the per-user job for `shed serve` (macOS: `~/Library/LaunchAgents/dev.shed.serve.plist`,
+  RunAtLoad, KeepAlive, a PATH with `~/.cargo/bin` and `~/.local/bin`, logs to `~/Library/Logs/shed.log`;
+  Linux: `~/.config/systemd/user/shed.service`) and prints the line that loads it; a file with other contents
+  is refused without `--force`. `shed uninstall` prints the lines that unload and remove it. `shed doctor`
+  checks the job file, that it is loaded, the socket, the server's version and the log, with a fix line
+  for each failure (exit 1).
 - Other agents' state escapes: Jan's OSC 9999 (`{"agentType":…,"state":…}`) sets the reported state
   (`waiting` reads as `blocked`) with `state_source: "jan-osc9999"`; garbled or unknown payloads are
   ignored. Each agent is one row in one table.
