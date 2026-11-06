@@ -802,7 +802,7 @@ pub enum Color {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalResizeParams {
     /// The terminal's name; default the one this connection watches.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "name", skip_serializing_if = "Option::is_none")]
     pub terminal: Option<String>,
     /// Columns, at least 1.
     pub cols: u16,

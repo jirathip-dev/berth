@@ -286,17 +286,8 @@ struct Session {
     readonly: BTreeSet<String>,
 }
 
-/// The terminal a request names (`terminal` or `name`), else the one the connection watches.
-fn target(request: &Request, session: &Session) -> Option<String> {
-    ["terminal", "name"]
-        .into_iter()
-        .find_map(|k| request.params.get(k)?.as_str())
-        .or(session.watching.as_deref())
-        .map(str::to_owned)
-}
-
-/// The read-only terminal an input, resize or attach request names, if any. Every name the
-/// request carries (`terminal` and `name`) is checked, so a second key cannot slip past.
+/// The read-only terminal an input, resize or attach request names, if any. Every name it gives
+/// (`terminal` and `name`) is checked, else the one the connection watches.
 fn readonly<'a>(method: Method, request: &'a Request, session: &'a Session) -> Option<&'a str> {
     let input = matches!(
         method,
@@ -308,16 +299,11 @@ fn readonly<'a>(method: Method, request: &'a Request, session: &'a Session) -> O
             | Method::TerminalResize
             | Method::Attach
     );
-    let mut named: Vec<&str> = ["terminal", "name"]
-        .into_iter()
-        .filter_map(|k| request.params.get(k)?.as_str())
-        .collect();
-    if named.is_empty() {
-        named.extend(session.watching.as_deref());
+    let mut named = ["terminal", "name"].map(|k| request.params.get(k).and_then(Value::as_str));
+    if named == [None, None] {
+        named[0] = session.watching.as_deref();
     }
-    named
-        .into_iter()
-        .find(|n| input && session.readonly.contains(*n))
+    (named.into_iter().flatten()).find(|n| input && session.readonly.contains(*n))
 }
 
 /// Answers one connection's requests, line by line, until it closes.
@@ -477,15 +463,14 @@ fn dispatch(
             Ok(empty())
         }
         Method::TerminalResize => {
-            let TerminalResizeParams { rows, cols, .. } = params(request)?;
-            let name = target(request, session).ok_or_else(|| {
-                RpcError::new(
-                    ErrorCode::InvalidParams,
-                    "give terminal, or watch one first",
-                )
-            })?;
-            let p = ResizeParams { name, rows, cols };
-            reg.resize(&p).map(|()| empty())
+            let p: TerminalResizeParams = params(request)?;
+            let Some(name) = p.terminal.or_else(|| session.watching.clone()) else {
+                let e = "give terminal, or watch one first";
+                return Err(RpcError::new(ErrorCode::InvalidParams, e));
+            };
+            let (rows, cols) = (p.rows, p.cols);
+            reg.resize(&ResizeParams { name, rows, cols })
+                .map(|()| empty())
         }
         Method::ReadOnly => {
             let TerminalParams { terminal } = params(request)?;

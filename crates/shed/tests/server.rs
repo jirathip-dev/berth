@@ -768,6 +768,10 @@ fn terminal_input_and_keys_arrive_and_a_readonly_client_is_refused() {
             json!({"name": "w", "terminal": "other", "cols": 10, "rows": 5}),
         ),
         ("attach", json!({"name": "w"})),
+        (
+            "terminal.resize",
+            json!({"name": "w", "cols": 10, "rows": 5}),
+        ),
     ];
     for (method, params) in refused {
         let (_, line, _) = viewer.call(1, method, &params);
