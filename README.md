@@ -24,7 +24,8 @@ around lanes:
   through a CLI call, the socket or an OSC escape. shed stores and streams it. Screen-scraping is only a fallback.
 - **Lanes are first-class.** A terminal carries labels (`fleet`, `issue`, `role`, `round`) and a worktree. List, wait
   and events filter by them.
-- **No UI to keep in sync.** shed draws nothing. herdsman's board is the UI, and any terminal can `attach`.
+- **No UI to keep in sync.** herdsman's board is the UI; `shed watch` is a read-only list and preview, and any
+  terminal can `attach`.
 - **One version everywhere.** Client and server are the same binary. A mismatch is refused with a clear message
   instead of half-working (herdr's old-server/new-client gap).
 - **Process hygiene built in.** Closing a terminal ends its whole process tree. Per-terminal memory and CPU are
@@ -47,6 +48,7 @@ around lanes:
 | `shed attach <t>` | Take over the terminal interactively; `Ctrl+\` detaches. |
 | `shed events [--label k=v] [--since N]` | Stream starts, state changes, exits, kills and resource moves as JSON lines; `--since` replays the last 1,000. |
 | `shed top` | The terminals by memory use, largest first. |
+| `shed watch [--label k=v]` | A live list of the terminals beside a read-only preview of the selected one; Enter attaches, `Ctrl+\` comes back, `/` filters, `q` quits. |
 | `shed run --acp <agent>`, `shed agents`, `shed approve`, `shed cancel` | ACP agents as structured terminals; see below. |
 | `shed --on <machine> …` / `shed machine add\|ls\|rm` | The same commands on another host over SSH (key login only). |
 | `shed machine stats [--on M] [--since T]` | Load per CPU, memory pressure, swap, free disk, uptime and terminals by state; one sample a minute kept 24 h. An unreachable machine answers offline (last seen) within 5 s. |
@@ -69,7 +71,7 @@ protocol over stdin/stdout for SSH.
 
 ## Constraints
 
-- **Rust, ≤ 6,200 non-test lines in `src/`** (CI-enforced, like herdsman).
+- **Rust, ≤ 6,700 non-test lines in `src/`** (CI-enforced, like herdsman).
 - **Few dependencies:** a PTY crate, a VT parser for the screen, serde/serde_json, clap. No async runtime unless a
   measured need appears.
 - **Fast:** every CLI call that doesn't wait is < 20 ms locally.
@@ -136,7 +138,7 @@ shed/
 - **Dependencies:** `cargo deny check` (licences: MIT/Apache/BSD/ISC only; advisories; no duplicate major versions) and
   a lockfile committed; Dependabot weekly, grouped.
 - **Docs:** `cargo doc --no-deps -D warnings` (every public item documented).
-- **Size:** the line cap check (`≤ 6,200` non-test lines across `crates/*/src`), plus a soft per-PR line budget stated in
+- **Size:** the line cap check (`≤ 6,700` non-test lines across `crates/*/src`), plus a soft per-PR line budget stated in
   the PR.
 - **MSRV:** pinned in `rust-toolchain.toml` and the workspace `rust-version`; CI tests MSRV and stable.
 - **Platforms:** macOS (arm64) and Linux (x86_64, arm64) in the CI matrix.

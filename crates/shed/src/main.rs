@@ -3,6 +3,7 @@
 
 mod attach;
 mod service;
+mod watch;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -141,6 +142,13 @@ enum Command {
     },
     /// List terminals by memory use, largest first.
     Top,
+    /// A live list of the terminals beside a read-only preview of the selected one; Enter attaches,
+    /// `Ctrl+\` comes back, `/` filters, `q` quits.
+    Watch {
+        /// Only terminals carrying this label, `k=v`; repeatable.
+        #[arg(long = "label", value_name = "K=V", value_parser = label)]
+        labels: Vec<(String, String)>,
+    },
     /// ACP: answer the oldest permission request with an option id (or kind, e.g. `allow_once`).
     Approve {
         /// The terminal.
@@ -395,13 +403,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 history,
             };
             let read: ReadResult = server.connect(None)?.call(Method::Read, &params)?;
-            print(json, &read, || {
-                if read.text.is_empty() {
-                    String::new()
-                } else {
-                    format!("{}\n", read.text)
-                }
-            })?;
+            let end = if read.text.is_empty() { "" } else { "\n" };
+            print(json, &read, || format!("{}{end}", read.text))?;
         }
         Command::Send { name, text } => send(&server, json, name, text)?,
         Command::Approve { name, option } => {
@@ -453,6 +456,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
         }
         Command::Top => top(&server, json)?,
+        Command::Watch { labels } => watch::watch(&server, labels.into_iter().collect())?,
         Command::Connect { autostart } => relay(&paths, cli.dir.as_deref(), autostart)?,
         Command::Machine(command) => return machine(&server, json, command),
         Command::Install { force } => service::install(force)?,
@@ -564,7 +568,7 @@ fn bridge(
         _ => Policy::Ask,
     };
     let here = std::env::current_dir().context("current directory")?;
-    let _raw = attach::RawMode::enter()?;
+    let _raw = attach::RawMode::enter(1, 0)?;
     let code = acp::bridge(cmd, &here, socket, state, policy, agent)?;
     Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
 }

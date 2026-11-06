@@ -5,7 +5,9 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use rustix::termios::{OptionalActions, Termios, tcgetattr, tcgetwinsize, tcsetattr};
+use rustix::termios::{
+    OptionalActions, SpecialCodeIndex, Termios, tcgetattr, tcgetwinsize, tcsetattr,
+};
 use shed_server::proto::{Method, ResizeParams, SendParams, Target, TerminalInfo};
 use shed_server::{Client, notification};
 
@@ -18,12 +20,15 @@ const RESIZE_POLL: Duration = Duration::from_millis(100);
 pub(crate) struct RawMode(Option<Termios>);
 
 impl RawMode {
-    pub(crate) fn enter() -> io::Result<Self> {
+    /// A read returns once `vmin` bytes came, or after `vtime` tenths of a second without input.
+    pub(crate) fn enter(vmin: u8, vtime: u8) -> io::Result<Self> {
         let Ok(saved) = tcgetattr(io::stdin()) else {
             return Ok(Self(None));
         };
         let mut raw = saved.clone();
         raw.make_raw();
+        raw.special_codes[SpecialCodeIndex::VMIN] = vmin;
+        raw.special_codes[SpecialCodeIndex::VTIME] = vtime;
         tcsetattr(io::stdin(), OptionalActions::Now, &raw)?;
         Ok(Self(Some(saved)))
     }
@@ -44,7 +49,7 @@ pub(crate) fn attach(mut client: Client, name: &str) -> anyhow::Result<()> {
     };
     let _: TerminalInfo = client.call(Method::Attach, &target)?;
     let (mut reader, writer) = client.split();
-    let raw = RawMode::enter()?;
+    let raw = RawMode::enter(1, 0)?;
     let (resizes, input) = (writer.try_clone()?, writer);
     let owned = name.to_owned();
     std::thread::spawn(move || forward_resizes(&resizes, &owned));

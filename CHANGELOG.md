@@ -29,6 +29,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `shed watch [--label k=v] [--on M]`: a full-screen live list of the terminals (a state dot, name, fleet,
+  issue and role, age; grouped by machine and fleet; an exited one stays dim for 60 s) beside a read-only
+  preview of the selected one's screen, at most 10 frames a second. ↑/↓ or j/k select, `/` filters by name
+  or label, Enter attaches (`Ctrl+\` comes back to the same selection), `q` quits. Below 80 columns the
+  preview is hidden. Plain ANSI escapes and raw mode; no TUI crate.
 - `screen.watch {terminal, since}` streams a running terminal's screen: the full screen, then only the
   rows that changed, as runs of text with their colours, bold, italic, underline and inverse, plus the
   cursor, the scrollback length and the size; at most 20 updates a second. `terminal.input`,
