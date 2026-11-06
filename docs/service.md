@@ -1,8 +1,17 @@
 # Running shed serve as a user job
 
 `shed serve` is the per-user server: it owns the terminals, the state file and the socket. Run it as a
-user job so it starts at login and comes back after a crash. shed does not install these files yet (a
-later milestone will); copy them by hand.
+user job so it starts at login and comes back after a crash:
+
+```sh
+shed install     # writes the job file for this binary and prints the line that loads it
+shed doctor      # job file, loaded, socket, version, log: `ok` or `FAIL … fix: <line>`
+shed uninstall   # prints the lines that unload the job and remove its file
+```
+
+shed writes the file but never loads or unloads it; run the printed lines. A job file with other
+contents is reported, not replaced, unless you pass `shed install --force`. The files below are the
+same jobs to copy by hand.
 
 | | Socket (mode 0600) | State file (mode 0600) |
 |---|---|---|

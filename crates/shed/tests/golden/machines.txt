@@ -17,7 +17,7 @@ old   old.example
 $ shed --on nope ls
 [exit 1] shed: no machine nope; see `shed machine ls`
 $ shed --on box serve
-[exit 1] shed: --on takes the terminal commands (run, ls, read, …), not hello, serve, connect, machine or agents
+[exit 1] shed: --on takes the terminal commands (run, ls, read, …), not hello, serve, connect, machine, agents, install or doctor
 $ shed --on box run -- true
 [exit 1] shed: with --on, pass --cwd as an absolute path on box
 $ shed --on box run --name t1 --cwd $DIR/remote -- sh -c echo hello from box; exec sleep 100

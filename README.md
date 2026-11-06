@@ -35,6 +35,7 @@ around lanes:
 | Command | What it does |
 |---|---|
 | `shed serve` | The per-user server (launchd/systemd user job). Owns the PTYs, the state and the socket. |
+| `shed install [--force]` / `shed uninstall` / `shed doctor` | Write that job's file and print how to load it (or unload it); check the job, socket, version and log. |
 | `shed run [--name N] [--label k=v…] [--cwd D] [--keep] -- <cmd…>` | Start a terminal. `--keep`: a lost program is replaced by a shell. |
 | `shed ls [--label k=v] [--json]` | List terminals: name, labels, cwd, state, pid tree, RSS/CPU, age. |
 | `shed get <t>` | One terminal as JSON. |
@@ -67,7 +68,7 @@ protocol over stdin/stdout for SSH.
 
 ## Constraints
 
-- **Rust, ≤ 5,200 non-test lines in `src/`** (CI-enforced, like herdsman).
+- **Rust, ≤ 5,400 non-test lines in `src/`** (CI-enforced, like herdsman).
 - **Few dependencies:** a PTY crate, a VT parser for the screen, serde/serde_json, clap. No async runtime unless a
   measured need appears.
 - **Fast:** every CLI call that doesn't wait is < 20 ms locally.
@@ -134,7 +135,7 @@ shed/
 - **Dependencies:** `cargo deny check` (licences: MIT/Apache/BSD/ISC only; advisories; no duplicate major versions) and
   a lockfile committed; Dependabot weekly, grouped.
 - **Docs:** `cargo doc --no-deps -D warnings` (every public item documented).
-- **Size:** the line cap check (`≤ 5,200` non-test lines across `crates/*/src`), plus a soft per-PR line budget stated in
+- **Size:** the line cap check (`≤ 5,400` non-test lines across `crates/*/src`), plus a soft per-PR line budget stated in
   the PR.
 - **MSRV:** pinned in `rust-toolchain.toml` and the workspace `rust-version`; CI tests MSRV and stable.
 - **Platforms:** macOS (arm64) and Linux (x86_64, arm64) in the CI matrix.

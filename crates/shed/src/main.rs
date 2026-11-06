@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod attach;
+mod service;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -180,6 +181,16 @@ enum Command {
     /// Machines that `--on` reaches over SSH (key login only).
     #[command(subcommand)]
     Machine(MachineCommand),
+    /// Write the launchd agent (macOS) or systemd user unit that runs `shed serve`; prints how to start it.
+    Install {
+        /// Replace a job file that has other contents.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Print the lines that stop the job and remove its file.
+    Uninstall,
+    /// Check the job file, that it is loaded, the socket, the server's version and the log.
+    Doctor,
 }
 
 #[derive(Subcommand)]
@@ -241,10 +252,13 @@ impl Server<'_> {
                 | Command::Machine(_)
                 | Command::Agents { .. }
                 | Command::AcpBridge { .. }
+                | Command::Install { .. }
+                | Command::Uninstall
+                | Command::Doctor
         );
         if local && on.is_some() {
             bail!(
-                "--on takes the terminal commands (run, ls, read, …), not hello, serve, connect, machine or agents"
+                "--on takes the terminal commands (run, ls, read, …), not hello, serve, connect, machine, agents, install or doctor"
             );
         }
         Ok(Server {
@@ -433,6 +447,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Top => top(&server, json)?,
         Command::Connect { autostart } => relay(&paths, cli.dir.as_deref(), autostart)?,
         Command::Machine(command) => machine(&paths, json, command)?,
+        Command::Install { force } => service::install(force)?,
+        Command::Uninstall => service::uninstall()?,
+        Command::Doctor if !service::doctor(&paths)? => return Ok(ExitCode::FAILURE),
+        Command::Doctor => {}
     }
     Ok(ExitCode::SUCCESS)
 }
