@@ -29,6 +29,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `screen.watch {terminal, since}` streams a running terminal's screen: the full screen, then only the
+  rows that changed, as runs of text with their colours, bold, italic, underline and inverse, plus the
+  cursor, the scrollback length and the size; at most 20 updates a second. `terminal.input`,
+  `terminal.keys` (`ctrl-x` works as `ctrl+x`) and `terminal.resize` (the watched terminal by default)
+  send input; `terminal.readonly` makes a terminal read-only for one connection, which then gets
+  `READONLY` for any input, keys or resize to it.
 - `shed machine stats [--on M] [--since T]` and the `machine.stats` method: load per CPU, memory pressure,
   swap used, free disk on the state volume, CPUs, uptime and the terminals by state. The server keeps one
   sample a minute for 24 h (`stats.json` beside the state file); `--since` returns them. With `--on`, a

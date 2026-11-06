@@ -21,7 +21,8 @@ const NAMED: &[(&str, &[u8])] = &[
     ("delete", b"\x1b[3~"),
 ];
 
-/// The bytes for one key: a name from the table above, `ctrl+<letter>`, or one literal character.
+/// The bytes for one key: a name from the table above, `ctrl+<letter>` (or `ctrl-<letter>`), or one
+/// literal character.
 ///
 /// Names are case-insensitive; a single character is sent as itself (UTF-8).
 ///
@@ -36,7 +37,10 @@ pub fn encode(key: &str) -> Result<Vec<u8>, Error> {
     if let Some((_, bytes)) = NAMED.iter().find(|(name, _)| *name == lower) {
         return Ok(bytes.to_vec());
     }
-    if let Some(&[c]) = lower.strip_prefix("ctrl+").map(str::as_bytes)
+    if let Some(&[c]) = (lower
+        .strip_prefix("ctrl+")
+        .or_else(|| lower.strip_prefix("ctrl-")))
+    .map(str::as_bytes)
         && c.is_ascii_lowercase()
     {
         return Ok(vec![c & 0x1f]);
@@ -70,6 +74,7 @@ mod tests {
             ("ctrl+c", b"\x03"),
             ("ctrl+d", b"\x04"),
             ("CTRL+Z", b"\x1a"),
+            ("Ctrl-x", b"\x18"),
             ("a", b"a"),
             ("é", "é".as_bytes()),
         ];

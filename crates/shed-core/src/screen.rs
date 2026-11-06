@@ -1,7 +1,8 @@
 //! The screen model: a VT parser feeding a visible grid and a bounded scrollback ring.
 //!
-//! It keeps text only (no colours or attributes) because shed reads screens, it does not draw them.
-//! Each character takes one cell; wide and combining characters are not measured yet.
+//! Each cell keeps its character and pen (colours, bold, italic, underline, inverse) for
+//! [`Screen::snapshot`]; the text reads drop the pen. Each character takes one cell; wide and combining
+//! characters are not measured yet.
 
 use std::collections::VecDeque;
 
@@ -34,6 +35,58 @@ const FOREIGN: [(&[u8], &str, Mapping); 1] = [(
         ("done", "done"),
     ],
 )];
+
+/// A colour: a palette index (0–15 the named colours, up to 255 the xterm palette) or 24-bit RGB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Color {
+    /// A palette index.
+    Index(u8),
+    /// Red, green, blue.
+    Rgb(u8, u8, u8),
+}
+
+/// How a cell is drawn, as SGR set it; `None` colours are the terminal's defaults.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the four SGR attributes are independent flags"
+)]
+pub struct Pen {
+    /// Foreground.
+    pub fg: Option<Color>,
+    /// Background.
+    pub bg: Option<Color>,
+    /// Bold.
+    pub bold: bool,
+    /// Italic.
+    pub italic: bool,
+    /// Underline.
+    pub underline: bool,
+    /// Foreground and background swapped.
+    pub inverse: bool,
+}
+
+/// Consecutive cells of one row with the same pen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Run {
+    /// The cells' characters.
+    pub text: String,
+    /// Their pen.
+    pub pen: Pen,
+}
+
+/// The visible screen as runs, for drawing it elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    /// The size.
+    pub size: Size,
+    /// The cursor's row and column, from 0.
+    pub cursor: (u16, u16),
+    /// The lines in scrollback.
+    pub scrollback: usize,
+    /// One list of runs per row; trailing blank cells in the default pen are dropped.
+    pub rows: Vec<Vec<Run>>,
+}
 
 /// A state a program reported, with an optional note.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +155,20 @@ impl Screen {
         lines.join("\n")
     }
 
+    /// The visible screen as runs, with the cursor and the scrollback length.
+    #[must_use]
+    pub fn snapshot(&self) -> Snapshot {
+        let g = &self.grid;
+        let clamp = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
+        let rows = g.cells.iter().map(|row| runs(row)).collect();
+        Snapshot {
+            size: g.size(),
+            cursor: (clamp(g.row), clamp(g.col)),
+            scrollback: g.history.len(),
+            rows,
+        }
+    }
+
     /// The current size.
     #[must_use]
     pub fn size(&self) -> Size {
@@ -125,12 +192,33 @@ fn join(mut lines: Vec<String>) -> String {
     lines.join("\n")
 }
 
-fn line_text(row: &[char]) -> String {
-    let s: String = row.iter().collect();
+fn line_text(row: &[Cell]) -> String {
+    let s: String = row.iter().map(|c| c.0).collect();
     s.trim_end().to_owned()
 }
 
-type Cells = Vec<Vec<char>>;
+/// One row's runs, without the trailing blank cells in the default pen.
+fn runs(row: &[Cell]) -> Vec<Run> {
+    let end = row.iter().rposition(|c| *c != space()).map_or(0, |i| i + 1);
+    let mut runs: Vec<Run> = Vec::new();
+    for &(c, pen) in &row[..end] {
+        match runs.last_mut() {
+            Some(run) if run.pen == pen => run.text.push(c),
+            _ => runs.push(Run {
+                text: c.to_string(),
+                pen,
+            }),
+        }
+    }
+    runs
+}
+
+type Cell = (char, Pen);
+/// A blank cell in the default pen.
+fn space() -> Cell {
+    (' ', Pen::default())
+}
+type Cells = Vec<Vec<Cell>>;
 
 struct Grid {
     rows: usize,
@@ -151,6 +239,8 @@ struct Grid {
     primary: Option<(Cells, (usize, usize))>,
     replies: Vec<u8>,
     report: Option<Report>,
+    /// The pen new characters are printed with.
+    pen: Pen,
 }
 
 impl Grid {
@@ -159,7 +249,7 @@ impl Grid {
         Self {
             rows,
             cols,
-            cells: vec![vec![' '; cols]; rows],
+            cells: vec![vec![space(); cols]; rows],
             row: 0,
             col: 0,
             wrap_next: false,
@@ -172,6 +262,7 @@ impl Grid {
             primary: None,
             replies: Vec::new(),
             report: None,
+            pen: Pen::default(),
         }
     }
 
@@ -187,8 +278,8 @@ impl Grid {
         self.cells.iter().map(|r| line_text(r)).collect()
     }
 
-    fn blank(&self) -> Vec<char> {
-        vec![' '; self.cols]
+    fn blank(&self) -> Vec<Cell> {
+        vec![space(); self.cols]
     }
 
     fn push_history(&mut self, line: String) {
@@ -248,7 +339,7 @@ impl Grid {
     fn erase(&mut self, row: usize, from: usize, to: usize) {
         let to = to.min(self.cols);
         if from < to {
-            self.cells[row][from..to].fill(' ');
+            self.cells[row][from..to].fill(space());
         }
     }
 
@@ -301,16 +392,17 @@ impl Grid {
         let n = n.min(cols - col);
         if insert {
             line[col..].rotate_right(n);
-            line[col..col + n].fill(' ');
+            line[col..col + n].fill(space());
         } else {
             line[col..].rotate_left(n);
-            line[cols - n..].fill(' ');
+            line[cols - n..].fill(space());
         }
     }
 
     fn set_alt(&mut self, on: bool) {
         if on && self.primary.is_none() {
-            let cells = std::mem::replace(&mut self.cells, vec![vec![' '; self.cols]; self.rows]);
+            let blank = vec![self.blank(); self.rows];
+            let cells = std::mem::replace(&mut self.cells, blank);
             self.primary = Some((cells, (self.row, self.col)));
         } else if !on && let Some((cells, (row, col))) = self.primary.take() {
             self.cells = cells;
@@ -322,7 +414,7 @@ impl Grid {
         let (rows, cols) = (usize::from(size.rows.max(1)), usize::from(size.cols.max(1)));
         let fit = |cells: &mut Cells| {
             for line in cells.iter_mut() {
-                line.resize(cols, ' ');
+                line.resize(cols, space());
             }
         };
         fit(&mut self.cells);
@@ -339,15 +431,66 @@ impl Grid {
             self.push_history(line_text(&line));
             self.row = self.row.saturating_sub(1);
         }
-        self.cells.resize(rows, vec![' '; cols]);
+        self.cells.resize(rows, vec![space(); cols]);
         if let Some((cells, _)) = &mut self.primary {
             fit(cells);
-            cells.resize(rows, vec![' '; cols]);
+            cells.resize(rows, vec![space(); cols]);
         }
         self.rows = rows;
         self.top = 0;
         self.bottom = rows - 1;
         self.goto(self.row, self.col);
+    }
+
+    /// SGR: sets the pen from `ESC [ … m` (attributes, the 8/16 colours, `38;5;n` and `38;2;r;g;b`, with
+    /// `;` or `:`).
+    fn sgr(&mut self, params: &Params) {
+        let mut it = params.iter().peekable();
+        while let Some(p) = it.next() {
+            let pen = &mut self.pen;
+            let index = |n: u16| Some(Color::Index(u8::try_from(n).unwrap_or(0)));
+            match p[0] {
+                0 => *pen = Pen::default(),
+                1 => pen.bold = true,
+                3 => pen.italic = true,
+                4 => pen.underline = true,
+                7 => pen.inverse = true,
+                22 => pen.bold = false,
+                23 => pen.italic = false,
+                24 => pen.underline = false,
+                27 => pen.inverse = false,
+                n @ 30..=37 => pen.fg = index(n - 30),
+                n @ 90..=97 => pen.fg = index(n - 82),
+                39 => pen.fg = None,
+                n @ 40..=47 => pen.bg = index(n - 40),
+                n @ 100..=107 => pen.bg = index(n - 92),
+                49 => pen.bg = None,
+                n @ (38 | 48) => {
+                    // The colon form carries its values as subparameters (`38:2::r:g:b` has a colour space id).
+                    let mut rest: Vec<u16> = if p.len() > 1 {
+                        p[1..].to_vec()
+                    } else {
+                        let take = match it.peek().map(|v| v[0]) {
+                            Some(5) => 2,
+                            Some(2) => 4,
+                            _ => 0,
+                        };
+                        it.by_ref().take(take).map(|v| v[0]).collect()
+                    };
+                    if rest.len() == 5 {
+                        rest.remove(1);
+                    }
+                    let byte = |i: usize| u8::try_from(rest[i]).unwrap_or(u8::MAX);
+                    let color = match rest.as_slice() {
+                        [5, _] => Some(Color::Index(byte(1))),
+                        [2, _, _, _] => Some(Color::Rgb(byte(1), byte(2), byte(3))),
+                        _ => continue,
+                    };
+                    *if n == 38 { &mut pen.fg } else { &mut pen.bg } = color;
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -368,7 +511,7 @@ impl Perform for Grid {
             self.linefeed();
             self.wrap_next = false;
         }
-        self.cells[self.row][self.col] = c;
+        self.cells[self.row][self.col] = (c, self.pen);
         if self.col + 1 == self.cols {
             self.wrap_next = true;
         } else {
@@ -445,6 +588,7 @@ impl Perform for Grid {
                     self.goto(0, 0);
                 }
             }
+            'm' => self.sgr(params),
             's' => self.saved = (row, col),
             'u' => self.goto(self.saved.0, self.saved.1),
             'n' if n == 6 => self
@@ -611,6 +755,56 @@ mod tests {
         assert_eq!(report, Some(("blocked".into(), Some("jan-osc9999".into()))));
         s.feed(b"\x1b]9999;{\"state\":\x07\x1b]9999;[1]\x07\x1b]9999;{\"state\":7}\x07x");
         assert_eq!((s.take_report(), s.text()), (None, "x".into()));
+    }
+
+    #[test]
+    fn sgr_sets_the_pen_and_snapshot_groups_cells_into_runs() {
+        let s = screen(
+            3,
+            20,
+            5,
+            "a\x1b[1;31mb\x1b[38;5;200;48:2::1:2:3;7mc\x1b[22;27;39;49;3;4md\x1b[mE \r\n\r\nz\x1b[1;2H",
+        );
+        let red_bold = Pen {
+            fg: Some(Color::Index(1)),
+            bold: true,
+            ..Pen::default()
+        };
+        let mixed = Pen {
+            fg: Some(Color::Index(200)),
+            bg: Some(Color::Rgb(1, 2, 3)),
+            inverse: true,
+            ..red_bold
+        };
+        let plain = |text: &str| Run {
+            text: text.into(),
+            pen: Pen::default(),
+        };
+        let snap = s.snapshot();
+        let first = vec![
+            plain("a"),
+            Run {
+                text: "b".into(),
+                pen: red_bold,
+            },
+            Run {
+                text: "c".into(),
+                pen: mixed,
+            },
+            Run {
+                text: "d".into(),
+                pen: Pen {
+                    italic: true,
+                    underline: true,
+                    ..Pen::default()
+                },
+            },
+            plain("E"),
+        ];
+        assert_eq!(snap.rows, vec![first, vec![], vec![plain("z")]]);
+        assert_eq!((snap.cursor, snap.scrollback), ((0, 1), 0));
+        assert_eq!(snap.size, Size { rows: 3, cols: 20 });
+        assert_eq!(s.text(), "abcdE\n\nz");
     }
 
     #[test]

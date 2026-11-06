@@ -9,8 +9,10 @@ pub mod agents;
 mod events;
 pub mod machines;
 mod registry;
+mod screen;
 mod stats;
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
@@ -22,8 +24,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use proto::{
-    ErrorCode, Hello, Method, Request, Response, RpcError, StatsParams, Target, VERSION,
-    WaitOutcome, WaitParams, WaitResult,
+    ErrorCode, Hello, Method, Request, ResizeParams, Response, RpcError, StatsParams, Target,
+    TerminalParams, TerminalResizeParams, VERSION, WaitOutcome, WaitParams, WaitResult,
+    WatchParams,
 };
 use registry::{Registry, Stream};
 use serde::Serialize;
@@ -302,6 +305,30 @@ struct Session {
     stream: Option<Stream>,
     /// The connection streams output or events; responses are no longer written.
     streaming: bool,
+    /// The terminal `screen.watch` streams.
+    watching: Option<String>,
+    /// The terminals `terminal.readonly` marked: their input is refused.
+    readonly: BTreeSet<String>,
+}
+
+/// The read-only terminal an input, resize or attach request names, if any. Every name it gives
+/// (`terminal` and `name`) is checked, else the one the connection watches.
+fn readonly<'a>(method: Method, request: &'a Request, session: &'a Session) -> Option<&'a str> {
+    let input = matches!(
+        method,
+        Method::Send
+            | Method::Keys
+            | Method::Resize
+            | Method::Input
+            | Method::TerminalKeys
+            | Method::TerminalResize
+            | Method::Attach
+    );
+    let mut named = ["terminal", "name"].map(|k| request.params.get(k).and_then(Value::as_str));
+    if named == [None, None] {
+        named[0] = session.watching.as_deref();
+    }
+    (named.into_iter().flatten()).find(|n| input && session.readonly.contains(*n))
 }
 
 /// Answers one connection's requests, line by line, until it closes.
@@ -408,6 +435,9 @@ fn dispatch(
             "send hello with your version first",
         ));
     }
+    if let Some(name) = readonly(method, request, session) {
+        return Err(RpcError::new(ErrorCode::ReadOnly, name));
+    }
     if method == Method::Kill {
         let Target { name } = params(request)?;
         let mut reg = lock(registry);
@@ -446,16 +476,10 @@ fn dispatch(
         Method::Ls => json(&reg.ls(&params(request)?)),
         Method::Get => json(&reg.get(&params::<Target>(request)?.name)?),
         Method::Read => json(&reg.read(&params(request)?)?),
-        Method::Send => reg
-            .send(&params(request)?)
-            .map(|()| Value::Object(serde_json::Map::new())),
-        Method::Keys => reg
-            .keys(&params(request)?)
-            .map(|()| Value::Object(serde_json::Map::new())),
+        Method::Send | Method::Input => reg.send(&params(request)?).map(|()| empty()),
+        Method::Keys | Method::TerminalKeys => reg.keys(&params(request)?).map(|()| empty()),
         Method::Rm => json(&reg.rm(&params::<Target>(request)?.name)?),
-        Method::Resize => reg
-            .resize(&params(request)?)
-            .map(|()| Value::Object(serde_json::Map::new())),
+        Method::Resize => reg.resize(&params(request)?).map(|()| empty()),
         Method::Attach => {
             let (info, attached) = reg.attach(&params::<Target>(request)?.name)?;
             session.stream = Some(attached);
@@ -463,16 +487,42 @@ fn dispatch(
         }
         Method::Events => {
             session.stream = Some(reg.subscribe(params(request)?));
-            Ok(Value::Object(serde_json::Map::new()))
+            Ok(empty())
+        }
+        Method::ScreenWatch => {
+            let p: WatchParams = params(request)?;
+            let term = Arc::clone(reg.live(&p.terminal)?);
+            session.stream = Some((Vec::new(), screen::watch(term, p.since)));
+            session.watching = Some(p.terminal);
+            Ok(empty())
+        }
+        Method::TerminalResize => {
+            let p: TerminalResizeParams = params(request)?;
+            let Some(name) = p.terminal.or_else(|| session.watching.clone()) else {
+                let e = "give terminal, or watch one first";
+                return Err(RpcError::new(ErrorCode::InvalidParams, e));
+            };
+            let (rows, cols) = (p.rows, p.cols);
+            reg.resize(&ResizeParams { name, rows, cols })
+                .map(|()| empty())
+        }
+        Method::ReadOnly => {
+            let TerminalParams { terminal } = params(request)?;
+            reg.get(&terminal)?;
+            session.readonly.insert(terminal);
+            Ok(empty())
         }
         Method::State => json(&reg.state(params(request)?)?),
-        Method::Emit => reg
-            .emit(params(request)?)
-            .map(|()| Value::Object(serde_json::Map::new())),
+        Method::Emit => reg.emit(params(request)?).map(|()| empty()),
         Method::Hello | Method::Kill | Method::Wait | Method::MachineStats => {
             Err(RpcError::new(ErrorCode::Internal, "handled above"))
         }
     }
+}
+
+/// The `{}` result.
+fn empty() -> Value {
+    Value::Object(serde_json::Map::new())
 }
 
 /// `wait`: blocks this connection, not the registry, until a state or output matches, the program

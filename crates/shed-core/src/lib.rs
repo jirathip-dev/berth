@@ -13,7 +13,7 @@ pub mod terminal;
 pub use history::History;
 pub use pattern::Pattern;
 pub use proctree::Usage;
-pub use screen::{Report, STATES, Screen, Size};
+pub use screen::{Color, Pen, Report, Run, STATES, Screen, Size, Snapshot};
 pub use terminal::{Terminal, Wake};
 
 /// Errors from shed-core.
