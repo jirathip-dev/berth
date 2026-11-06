@@ -23,9 +23,9 @@ use shed_server::acp::{self, Input, Policy};
 use shed_server::agents;
 use shed_server::machines::{self, Machine};
 use shed_server::proto::{
-    Event, EventKind, EventsParams, KeysParams, LsParams, Method, ReadParams, ReadResult, Reported,
-    RunParams, SendParams, State, StateParams, Target, TerminalInfo, WaitOutcome, WaitParams,
-    WaitResult,
+    Event, EventKind, EventsParams, KeysParams, LsParams, MachineStats, Method, ReadParams,
+    ReadResult, Reported, RunParams, SendParams, State, StateParams, StatsParams, Target,
+    TerminalInfo, WaitOutcome, WaitParams, WaitResult,
 };
 use shed_server::{Client, Paths};
 
@@ -227,6 +227,12 @@ enum MachineCommand {
         /// The machine.
         name: String,
     },
+    /// This machine's health, or with `--on` another's (offline after 5 s without an answer, exit 1).
+    Stats {
+        /// Add the samples kept (one a minute, 24 h) after this time, unix seconds.
+        #[arg(long, value_name = "T")]
+        since: Option<u64>,
+    },
 }
 
 /// Where the commands go: the local server, or the one on `--on`'s machine.
@@ -249,7 +255,9 @@ impl Server<'_> {
             Command::Hello
                 | Command::Serve { .. }
                 | Command::Connect { .. }
-                | Command::Machine(_)
+                | Command::Machine(
+                    MachineCommand::Add { .. } | MachineCommand::Ls | MachineCommand::Rm { .. }
+                )
                 | Command::Agents { .. }
                 | Command::AcpBridge { .. }
                 | Command::Install { .. }
@@ -446,7 +454,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Top => top(&server, json)?,
         Command::Connect { autostart } => relay(&paths, cli.dir.as_deref(), autostart)?,
-        Command::Machine(command) => machine(&paths, json, command)?,
+        Command::Machine(command) => return machine(&server, json, command),
         Command::Install { force } => service::install(force)?,
         Command::Uninstall => service::uninstall()?,
         Command::Doctor if !service::doctor(&paths)? => return Ok(ExitCode::FAILURE),
@@ -767,8 +775,9 @@ fn events_on(server: &Server, machine: &Machine, params: EventsParams) -> anyhow
     broken.map_or(Ok(()), |e| Err(e.into()))
 }
 
-/// `shed machine add|ls|rm`.
-fn machine(paths: &Paths, json: bool, command: MachineCommand) -> anyhow::Result<()> {
+/// `shed machine add|ls|rm|stats`.
+fn machine(server: &Server, json: bool, command: MachineCommand) -> anyhow::Result<ExitCode> {
+    let paths = server.paths;
     match command {
         MachineCommand::Add { name, target } => {
             let m = machines::add(&paths.config, &name, &target)?;
@@ -790,7 +799,52 @@ fn machine(paths: &Paths, json: bool, command: MachineCommand) -> anyhow::Result
             let m = machines::remove(&paths.config, &name)?;
             print(json, &m, || format!("{} removed\n", m.name))
         }
-    }
+        MachineCommand::Stats { since } => {
+            return machine_stats(server, json, StatsParams { since });
+        }
+    }?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `shed machine stats [--since T] [--on M]`: exit 1 when the machine is offline.
+fn machine_stats(server: &Server, json: bool, params: StatsParams) -> anyhow::Result<ExitCode> {
+    let stats: MachineStats = match &server.on {
+        None => server.connect(None)?.call(Method::MachineStats, &params)?,
+        Some(m) => {
+            let control = server.paths.socket.parent().unwrap_or(Path::new("."));
+            let seen = server.paths.state.with_file_name("seen");
+            match machines::stats(m, control, &seen, params)? {
+                Ok(stats) => stats,
+                Err(offline) => {
+                    print(json, &offline, || match offline.last_seen {
+                        Some(t) => format!("{} offline, last seen {t}\n", m.name),
+                        None => format!("{} offline, never seen\n", m.name),
+                    })?;
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+        }
+    };
+    let s = &stats.now;
+    let terminals: Vec<String> = s
+        .terminals
+        .iter()
+        .map(|(k, n)| format!("{k}={n}"))
+        .collect();
+    print(json, &stats, || {
+        let (load, mem, swap, disk) = (
+            s.load_per_cpu,
+            s.mem_pressure_pct,
+            s.swap_used_mb,
+            s.disk_free_mb,
+        );
+        let terminals = terminals.join(",");
+        format!(
+            "load/cpu {load:.2}  memory {mem}%  swap {swap}M  disk free {disk}M  cpus {}  up {}s  terminals {terminals}\n",
+            s.cpus, s.uptime_s
+        )
+    })?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Prints `value` as one JSON line with `--json`, else `text()`.

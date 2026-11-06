@@ -1,0 +1,206 @@
+//! Machine health for `machine.stats`: a sample of the system now, and one a minute kept for 24 h in
+//! `stats.json` beside the state file. Linux reads `/proc`; elsewhere (macOS) `sysctl`; both `df`.
+
+use std::collections::VecDeque;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use shed_proto::Sample;
+
+/// Seconds between kept samples.
+const EVERY: u64 = 60;
+/// How long samples are kept, in seconds.
+const DAY: u64 = 86_400;
+
+/// Unix seconds now.
+pub(crate) fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn stdout(cmd: &mut Command) -> String {
+    cmd.output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// The system now, without terminal counts; `dir` is on the volume whose free space counts. A value
+/// that cannot be read is 0.
+pub(crate) fn system(dir: &Path) -> Sample {
+    let cpus =
+        std::thread::available_parallelism().map_or(1, |n| u32::try_from(n.get()).unwrap_or(1));
+    let (load, mem_pressure_pct, swap_used_mb, uptime_s) = probe();
+    let df = stdout(Command::new("df").arg("-Pk").arg(dir));
+    // `df -P`: a header, then filesystem, 1024-blocks, used, available, ….
+    let free_kb = df.lines().nth(1).and_then(|l| l.split_whitespace().nth(3));
+    Sample {
+        at: unix_now(),
+        load_per_cpu: load / f64::from(cpus),
+        mem_pressure_pct,
+        swap_used_mb,
+        disk_free_mb: free_kb.and_then(|v| v.parse().ok()).unwrap_or(0) / 1024,
+        cpus: cpus.into(),
+        uptime_s,
+        terminals: std::collections::BTreeMap::new(),
+    }
+}
+
+/// Load, memory pressure (percent), swap used (MiB) and uptime (s) from `/proc`.
+#[cfg(target_os = "linux")]
+fn probe() -> (f64, u64, u64, u64) {
+    let read = |p: &str| fs::read_to_string(p).unwrap_or_default();
+    let meminfo = read("/proc/meminfo");
+    let kb = |key: &str| {
+        let line = meminfo
+            .lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix(':'));
+        let value = line.and_then(|l| l.split_whitespace().next()?.parse::<u64>().ok());
+        value.unwrap_or(0)
+    };
+    let total = kb("MemTotal").max(1);
+    let uptime = read("/proc/uptime");
+    (
+        read("/proc/loadavg")
+            .split(' ')
+            .next()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0),
+        100 - kb("MemAvailable").min(total) * 100 / total,
+        kb("SwapTotal").saturating_sub(kb("SwapFree")) / 1024,
+        uptime
+            .split(['.', ' '])
+            .next()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+    )
+}
+
+/// Load, memory pressure (percent), swap used (MiB) and uptime (s) from `sysctl`.
+#[cfg(not(target_os = "linux"))]
+fn probe() -> (f64, u64, u64, u64) {
+    let keys = [
+        "vm.loadavg",
+        "kern.memorystatus_level",
+        "vm.swapusage",
+        "kern.boottime",
+    ];
+    parse_sysctl(
+        &stdout(Command::new("sysctl").arg("-n").args(keys)),
+        unix_now(),
+    )
+}
+
+/// `sysctl -n vm.loadavg kern.memorystatus_level vm.swapusage kern.boottime`, a value a line:
+/// `{ 1.50 1.20 1.00 }`, the percent of memory free, `total = 2048.00M  used = 1024.50M  free = …`
+/// and `{ sec = 1762000000, usec = 0 } …`.
+#[cfg(any(not(target_os = "linux"), test))]
+fn parse_sysctl(text: &str, now: u64) -> (f64, u64, u64, u64) {
+    let mut lines = text.lines();
+    let mut next = || lines.next().unwrap_or_default();
+    let load = next()
+        .split_whitespace()
+        .nth(1)
+        .and_then(|v| v.parse().ok());
+    let free = next().trim().parse::<u64>().map_or(100, |f| f.min(100));
+    let after = |line: &str, key: &str, end: char| {
+        let value = line.split(key).nth(1)?.split(end).next()?;
+        value.parse::<u64>().ok()
+    };
+    let swap = after(next(), "used = ", '.');
+    let boot = after(next(), "sec = ", ',');
+    (
+        load.unwrap_or(0.0),
+        100 - free,
+        swap.unwrap_or(0),
+        boot.map_or(0, |b| now.saturating_sub(b)),
+    )
+}
+
+/// The kept samples, one a minute for 24 h, saved to `path` as each is added.
+pub(crate) struct Stats {
+    samples: VecDeque<Sample>,
+    path: PathBuf,
+}
+
+impl Stats {
+    /// The samples saved at `path`; none when it is missing or unreadable.
+    pub(crate) fn load(path: &Path) -> Self {
+        let saved = fs::read(path).ok();
+        Self {
+            samples: saved
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default(),
+            path: path.to_owned(),
+        }
+    }
+
+    /// A sample is due at `now`: none is kept, or the last is a minute old.
+    pub(crate) fn due(&self, now: u64) -> bool {
+        self.samples.back().is_none_or(|s| now >= s.at + EVERY)
+    }
+
+    /// Keeps `sample`, drops those 24 h older and saves (best effort: a failed save loses history only).
+    pub(crate) fn push(&mut self, sample: Sample) {
+        let cutoff = sample.at.saturating_sub(DAY);
+        self.samples.push_back(sample);
+        while self.samples.front().is_some_and(|s| s.at <= cutoff) {
+            self.samples.pop_front();
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        if serde_json::to_vec(&self.samples).is_ok_and(|b| fs::write(&tmp, b).is_ok()) {
+            let _ = fs::rename(&tmp, &self.path);
+        }
+    }
+
+    /// The kept samples after `since`, oldest first.
+    pub(crate) fn since(&self, since: u64) -> Vec<Sample> {
+        self.samples
+            .iter()
+            .filter(|s| s.at > since)
+            .cloned()
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_sample_a_minute_on_a_fake_clock_and_24_hours_kept() {
+        let dir = std::env::temp_dir().join(format!("shed-stats-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stats.json");
+        let _ = fs::remove_file(&path);
+        let mut stats = Stats::load(&path);
+        // The server checks every 10 s; a fake clock runs 25 h from t0.
+        let t0 = 1_762_000_000;
+        for now in (t0..t0 + 25 * 3600).step_by(10) {
+            if stats.due(now) {
+                stats.push(Sample {
+                    at: now,
+                    ..Sample::default()
+                });
+            }
+        }
+        let kept = stats.since(0);
+        assert_eq!(kept.len(), 1_440);
+        assert!(kept.windows(2).all(|w| w[1].at - w[0].at == 60));
+        let last = kept[1_439].at;
+        assert_eq!(last, t0 + 25 * 3600 - 60);
+        assert_eq!(kept[0].at, last - 1_439 * 60);
+        assert_eq!(stats.since(last - 600).len(), 10);
+        assert_eq!(Stats::load(&path).since(0), kept, "saved and loaded back");
+    }
+
+    #[test]
+    fn parses_macos_sysctl() {
+        let text = "{ 3.20 2.10 1.90 }\n58\ntotal = 2048.00M  used = 1024.50M  free = 1023.50M  (encrypted)\n\
+                    { sec = 1762000000, usec = 5 } Thu Nov  6 10:00:00 2026\n";
+        assert_eq!(parse_sysctl(text, 1_762_003_600), (3.2, 42, 1024, 3600));
+        assert_eq!(parse_sysctl("", 5), (0.0, 0, 0, 0));
+    }
+}

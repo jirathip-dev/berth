@@ -29,6 +29,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `shed machine stats [--on M] [--since T]` and the `machine.stats` method: load per CPU, memory pressure,
+  swap used, free disk on the state volume, CPUs, uptime and the terminals by state. The server keeps one
+  sample a minute for 24 h (`stats.json` beside the state file); `--since` returns them. With `--on`, a
+  machine that gives no answer within 5 s is reported offline with when it was last seen (exit 1).
 - `shed install [--force]` writes the per-user job for `shed serve` (macOS: `~/Library/LaunchAgents/dev.shed.serve.plist`,
   RunAtLoad, KeepAlive, a PATH with `~/.cargo/bin` and `~/.local/bin`, logs to `~/Library/Logs/shed.log`;
   Linux: `~/.config/systemd/user/shed.service`) and prints the line that loads it; a file with other contents

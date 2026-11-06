@@ -9,6 +9,7 @@ pub mod agents;
 mod events;
 pub mod machines;
 mod registry;
+mod stats;
 
 use std::ffi::OsString;
 use std::fs;
@@ -21,8 +22,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use proto::{
-    ErrorCode, Hello, Method, Request, Response, RpcError, Target, VERSION, WaitOutcome,
-    WaitParams, WaitResult,
+    ErrorCode, Hello, Method, Request, Response, RpcError, StatsParams, Target, VERSION,
+    WaitOutcome, WaitParams, WaitResult,
 };
 use registry::{Registry, Stream};
 use serde::Serialize;
@@ -213,6 +214,20 @@ fn sample(registry: &Mutex<Registry>, every: Duration) {
     }
 }
 
+/// Keeps a machine sample (with the terminal counts) when one is due.
+fn record_stats(registry: &Mutex<Registry>) {
+    let (due, dir) = {
+        let reg = lock(registry);
+        (reg.stats.due(stats::unix_now()), reg.dir())
+    };
+    if due {
+        let sample = stats::system(&dir);
+        let mut reg = lock(registry);
+        let _ = reg.refresh();
+        reg.record(sample);
+    }
+}
+
 /// Loads the state, binds the socket (mode 0600, its directory 0700), prints `shed ready <version>
 /// <socket>` and serves until killed, sampling each terminal's memory and CPU every `sample_every`.
 ///
@@ -243,6 +258,15 @@ pub fn serve(paths: &Paths, sample_every: Duration) -> Result<(), Error> {
     }
     let sampler = Arc::clone(&registry);
     std::thread::spawn(move || sample(&sampler, sample_every));
+    // One machine sample now, then one whenever due, checked every 10 s.
+    record_stats(&registry);
+    let recorder = Arc::clone(&registry);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(10));
+            record_stats(&recorder);
+        }
+    });
     if let Some(dir) = paths.socket.parent() {
         fs::DirBuilder::new()
             .recursive(true)
@@ -400,6 +424,15 @@ fn dispatch(
     if method == Method::Wait {
         return json(&wait(registry, &params(request)?)?);
     }
+    if method == Method::MachineStats {
+        let p: StatsParams = params(request)?;
+        let dir = lock(registry).dir();
+        // Sampled outside the lock: it runs `df` (and `sysctl` on macOS).
+        let now = stats::system(&dir);
+        let mut reg = lock(registry);
+        reg.refresh()?;
+        return json(&reg.machine_stats(now, p.since));
+    }
     let mut reg = lock(registry);
     reg.refresh()?;
     match method {
@@ -436,7 +469,7 @@ fn dispatch(
         Method::Emit => reg
             .emit(params(request)?)
             .map(|()| Value::Object(serde_json::Map::new())),
-        Method::Hello | Method::Kill | Method::Wait => {
+        Method::Hello | Method::Kill | Method::Wait | Method::MachineStats => {
             Err(RpcError::new(ErrorCode::Internal, "handled above"))
         }
     }
