@@ -137,9 +137,11 @@ impl Stats {
         }
     }
 
-    /// A sample is due at `now`: none is kept, or the last is a minute old.
-    pub(crate) fn due(&self, now: u64) -> bool {
-        self.samples.back().is_none_or(|s| now >= s.at + EVERY)
+    /// The seconds from `now` until a sample is due (0: due now, none is kept or the last is a minute old).
+    pub(crate) fn until_due(&self, now: u64) -> u64 {
+        self.samples
+            .back()
+            .map_or(0, |s| (s.at + EVERY).saturating_sub(now))
     }
 
     /// Keeps `sample`, drops those 24 h older and saves (best effort: a failed save loses history only).
@@ -179,7 +181,7 @@ mod tests {
         // The server checks every 10 s; a fake clock runs 25 h from t0.
         let t0 = 1_762_000_000;
         for now in (t0..t0 + 25 * 3600).step_by(10) {
-            if stats.due(now) {
+            if stats.until_due(now) == 0 {
                 stats.push(Sample {
                     at: now,
                     ..Sample::default()
