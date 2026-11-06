@@ -248,11 +248,13 @@ pub enum Method {
     TerminalResize,
     /// Refuse this connection's input to a terminal: [`TerminalParams`] → `{}`.
     ReadOnly,
+    /// The machine's health: [`StatsParams`] → [`MachineStats`].
+    MachineStats,
 }
 
 impl Method {
     /// Every method, in documentation order.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Hello,
         Self::Run,
         Self::Ls,
@@ -273,6 +275,7 @@ impl Method {
         Self::TerminalKeys,
         Self::TerminalResize,
         Self::ReadOnly,
+        Self::MachineStats,
     ];
 
     /// The wire name.
@@ -299,6 +302,7 @@ impl Method {
             Self::TerminalKeys => "terminal.keys",
             Self::TerminalResize => "terminal.resize",
             Self::ReadOnly => "terminal.readonly",
+            Self::MachineStats => "machine.stats",
         }
     }
 
@@ -359,6 +363,9 @@ impl Method {
             }
             Self::ReadOnly => {
                 "Mark the terminal read-only for this connection: from then on, until it closes, the connection's `send`, `keys`, `resize`, `attach`, `terminal.input`, `terminal.keys` and `terminal.resize` to the terminal are refused with `READONLY`. The connection may resize only the terminals it has not marked."
+            }
+            Self::MachineStats => {
+                "The machine's health now: load per CPU, memory pressure (percent of memory not available), swap used, free space on the volume of the state file, CPUs, uptime and the terminals by state (the reported state while running, else `running`; `exited`). The server keeps one sample a minute for 24 h; `since` (unix seconds) adds those after it as `history`."
             }
         }
     }
@@ -673,6 +680,46 @@ pub struct EmitParams {
     /// The event.
     #[serde(flatten)]
     pub kind: EventKind,
+}
+
+/// `machine.stats` params.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatsParams {
+    /// Add the kept samples taken after this time (unix seconds) as `history`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+}
+
+/// One sample of a machine's health.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Sample {
+    /// When it was taken, unix seconds.
+    pub at: u64,
+    /// The 1-minute load average divided by `cpus`.
+    pub load_per_cpu: f64,
+    /// Percent of memory not available.
+    pub mem_pressure_pct: u64,
+    /// Swap in use, MiB.
+    pub swap_used_mb: u64,
+    /// Free space on the volume of the state file, MiB.
+    pub disk_free_mb: u64,
+    /// Logical CPUs.
+    pub cpus: u64,
+    /// Seconds since boot.
+    pub uptime_s: u64,
+    /// Terminals by state: the reported state while running, else `running`; `exited`.
+    pub terminals: BTreeMap<String, u64>,
+}
+
+/// `machine.stats` result: a sample taken now, and the kept ones after `since`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MachineStats {
+    /// Now.
+    #[serde(flatten)]
+    pub now: Sample,
+    /// The kept samples (one a minute, 24 h) after `since`, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<Sample>,
 }
 
 /// A terminal's process tree's resource use at the last sample.

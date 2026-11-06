@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json, to_value};
 use shed_proto::{
     ApprovalOption, Color, EmitParams, ErrorCode, Event, EventKind, EventsParams, Hello,
-    KeysParams, Line, LsParams, Method, ReadParams, ReadResult, Reported, Request, ResizeParams,
-    Resources, Response, RpcError, Run, RunParams, ScreenUpdate, SendParams, State, StateParams,
-    Target, TerminalInfo, TerminalParams, TerminalResizeParams, VERSION, WaitOutcome, WaitParams,
-    WaitResult, WatchParams,
+    KeysParams, Line, LsParams, MachineStats, Method, ReadParams, ReadResult, Reported, Request,
+    ResizeParams, Resources, Response, RpcError, Run, RunParams, Sample, ScreenUpdate, SendParams,
+    State, StateParams, StatsParams, Target, TerminalInfo, TerminalParams, TerminalResizeParams,
+    VERSION, WaitOutcome, WaitParams, WaitResult, WatchParams,
 };
 
 fn info(state: State) -> TerminalInfo {
@@ -294,6 +294,30 @@ fn example(method: Method) -> (Value, Value) {
         | Method::TerminalKeys
         | Method::TerminalResize
         | Method::ReadOnly => (terminal_params(method), json!({})),
+        Method::MachineStats => (
+            to_value(StatsParams {
+                since: Some(1_762_416_000),
+            })
+            .unwrap(),
+            to_value(MachineStats {
+                now: sample(1_762_416_090),
+                history: vec![sample(1_762_416_060)],
+            })
+            .unwrap(),
+        ),
+    }
+}
+
+fn sample(at: u64) -> Sample {
+    Sample {
+        at,
+        load_per_cpu: 0.25,
+        mem_pressure_pct: 42,
+        swap_used_mb: 512,
+        disk_free_mb: 120_000,
+        cpus: 8,
+        uptime_s: 86_400,
+        terminals: BTreeMap::from([("exited".into(), 1), ("working".into(), 2)]),
     }
 }
 
