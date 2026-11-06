@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write as _};
+use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
@@ -30,9 +30,26 @@ pub(crate) const GRACE: Duration = Duration::from_secs(2);
 /// The state file's format version.
 const FILE_VERSION: u32 = 1;
 
-/// What `attach` and `events` stream: a redraw of the screen or the replayed events, then the raw
-/// output or the event lines.
-pub(crate) type Stream = (Vec<u8>, Receiver<Vec<u8>>);
+/// What `attach`, `events` and `screen.watch` stream: a redraw of the screen or the replayed events,
+/// then the raw output, event lines or updates, each written and flushed as it comes, until the
+/// source ends or a write fails.
+pub(crate) type Stream = Box<dyn FnOnce(&mut dyn Write) + Send>;
+
+/// The [`Stream`] of `first`, then each message from `rx`.
+pub(crate) fn stream<T: AsRef<[u8]> + Send + 'static>(first: Vec<u8>, rx: Receiver<T>) -> Stream {
+    Box::new(move |out| {
+        let _ = out.write_all(&first).and_then(|()| out.flush());
+        for message in rx {
+            if out
+                .write_all(message.as_ref())
+                .and_then(|()| out.flush())
+                .is_err()
+            {
+                return;
+            }
+        }
+    })
+}
 
 /// The state file: every terminal's last known info.
 #[derive(Serialize, Deserialize)]
@@ -334,7 +351,8 @@ impl Registry {
 
     /// `events`: the replay and the stream.
     pub(crate) fn subscribe(&mut self, p: EventsParams) -> Stream {
-        self.events.subscribe(p)
+        let (replay, rx) = self.events.subscribe(p);
+        stream(replay, rx)
     }
 
     /// The live terminals, to watch.
@@ -505,7 +523,7 @@ impl Registry {
         let term = self.live(name)?;
         let output = term.subscribe();
         let redraw = format!("\x1b[H\x1b[2J{}", term.screen().replace('\n', "\r\n"));
-        Ok((self.get(name)?, (redraw.into_bytes(), output)))
+        Ok((self.get(name)?, stream(redraw.into_bytes(), output)))
     }
 
     /// `state`: records a running terminal's reported state.

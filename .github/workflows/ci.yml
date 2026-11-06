@@ -56,3 +56,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: test
         run: cargo test --workspace --locked
+
+  # The event fan-out bench at the PR's base and head on one runner, median of 5 each; fails if the
+  # head is more than 10% slower.
+  bench-fanout:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: fan-out bench, base vs head
+        run: BENCH_TARGET="$RUNNER_TEMP/bench" scripts/bench-fanout.sh base .

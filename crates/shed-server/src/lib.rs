@@ -15,7 +15,7 @@ mod stats;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
+use std::io::{self, BufRead as _, BufReader, BufWriter, Read as _, Write as _};
 use std::net::Shutdown;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -217,18 +217,21 @@ fn sample(registry: &Mutex<Registry>, every: Duration) {
     }
 }
 
-/// Keeps a machine sample (with the terminal counts) when one is due.
-fn record_stats(registry: &Mutex<Registry>) {
-    let (due, dir) = {
+/// Keeps a machine sample (with the terminal counts) when one is due; the wait until the next one is.
+fn record_stats(registry: &Mutex<Registry>) -> Duration {
+    let (wait, dir) = {
         let reg = lock(registry);
-        (reg.stats.due(stats::unix_now()), reg.dir())
+        (reg.stats.until_due(stats::unix_now()), reg.dir())
     };
-    if due {
-        let sample = stats::system(&dir);
-        let mut reg = lock(registry);
-        let _ = reg.refresh();
-        reg.record(sample);
+    if wait > 0 {
+        return Duration::from_secs(wait);
     }
+    let sample = stats::system(&dir);
+    let mut reg = lock(registry);
+    let _ = reg.refresh();
+    reg.record(sample);
+    // At least a second, so a clock that jumps never makes this spin.
+    Duration::from_secs(reg.stats.until_due(stats::unix_now()).max(1))
 }
 
 /// Loads the state, binds the socket (mode 0600, its directory 0700), prints `shed ready <version>
@@ -261,13 +264,14 @@ pub fn serve(paths: &Paths, sample_every: Duration) -> Result<(), Error> {
     }
     let sampler = Arc::clone(&registry);
     std::thread::spawn(move || sample(&sampler, sample_every));
-    // One machine sample now, then one whenever due, checked every 10 s.
-    record_stats(&registry);
+    // One machine sample now, then a timer to each next one.
+    let first = record_stats(&registry);
     let recorder = Arc::clone(&registry);
     std::thread::spawn(move || {
+        let mut wait = first;
         loop {
-            std::thread::sleep(Duration::from_secs(10));
-            record_stats(&recorder);
+            std::thread::sleep(wait);
+            wait = record_stats(&recorder);
         }
     });
     if let Some(dir) = paths.socket.parent() {
@@ -334,7 +338,7 @@ fn readonly<'a>(method: Method, request: &'a Request, session: &'a Session) -> O
 /// Answers one connection's requests, line by line, until it closes.
 fn connection(registry: &Arc<Mutex<Registry>>, stream: &UnixStream) {
     let mut session = Session::default();
-    let mut out = stream;
+    let mut out = BufWriter::new(stream);
     for line in BufReader::new(stream).lines() {
         let Ok(line) = line else { return };
         if line.trim().is_empty() {
@@ -343,27 +347,23 @@ fn connection(registry: &Arc<Mutex<Registry>>, stream: &UnixStream) {
         if let Some(response) = respond(registry, &mut session, &line)
             && !session.streaming
         {
-            let Ok(mut bytes) = serde_json::to_vec(&response) else {
-                return;
-            };
-            bytes.push(b'\n');
-            if out.write_all(&bytes).is_err() {
+            let written = serde_json::to_writer(&mut out, &response).map_err(io::Error::from);
+            if written
+                .and_then(|()| out.write_all(b"\n"))
+                .and_then(|()| out.flush())
+                .is_err()
+            {
                 return;
             }
         }
-        if let Some((redraw, output)) = session.stream.take() {
-            let Ok(mut out) = stream.try_clone() else {
+        if let Some(pump) = session.stream.take() {
+            let Ok(socket) = stream.try_clone() else {
                 return;
             };
             session.streaming = true;
             std::thread::spawn(move || {
-                let _ = out.write_all(&redraw);
-                for chunk in output {
-                    if out.write_all(&chunk).is_err() {
-                        break;
-                    }
-                }
-                let _ = out.shutdown(Shutdown::Both);
+                pump(&mut BufWriter::new(&socket));
+                let _ = socket.shutdown(Shutdown::Both);
             });
         }
     }
@@ -492,7 +492,7 @@ fn dispatch(
         Method::ScreenWatch => {
             let p: WatchParams = params(request)?;
             let term = Arc::clone(reg.live(&p.terminal)?);
-            session.stream = Some((Vec::new(), screen::watch(term, p.since)));
+            session.stream = Some(registry::stream(Vec::new(), screen::watch(term, p.since)));
             session.watching = Some(p.terminal);
             Ok(empty())
         }
@@ -583,7 +583,7 @@ fn wait(registry: &Mutex<Registry>, p: &WaitParams) -> Result<WaitResult, RpcErr
 /// A connection to a server, past the version handshake.
 pub struct Client {
     reader: BufReader<UnixStream>,
-    writer: UnixStream,
+    writer: BufWriter<UnixStream>,
     next_id: u64,
 }
 
@@ -605,7 +605,7 @@ impl Client {
     pub fn over(writer: UnixStream) -> Result<Self, Error> {
         let mut client = Self {
             reader: BufReader::new(writer.try_clone()?),
-            writer,
+            writer: BufWriter::new(writer),
             next_id: 1,
         };
         let server: Hello = client.call(Method::Hello, &Hello::ours())?;
@@ -628,9 +628,9 @@ impl Client {
     ) -> Result<R, Error> {
         let request = Request::new(self.next_id, method, serde_json::to_value(params)?);
         self.next_id += 1;
-        let mut line = serde_json::to_vec(&request)?;
-        line.push(b'\n');
-        self.writer.write_all(&line)?;
+        serde_json::to_writer(&mut self.writer, &request)?;
+        self.writer.write_all(b"\n")?;
+        self.writer.flush()?;
         let mut reply = String::new();
         if self.reader.read_line(&mut reply)? == 0 {
             return Err(Error::BadResponse("connection closed".to_owned()));
@@ -650,7 +650,8 @@ impl Client {
     /// carries the terminal's output and the writer takes [`notification`]s.
     #[must_use]
     pub fn split(self) -> (BufReader<UnixStream>, UnixStream) {
-        (self.reader, self.writer)
+        // Flushed after every call, so nothing is left in the buffer.
+        (self.reader, self.writer.into_parts().0)
     }
 }
 
