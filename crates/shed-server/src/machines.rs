@@ -19,6 +19,7 @@ use std::os::unix::fs::DirBuilderExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -29,6 +30,8 @@ use crate::{Client, Error};
 
 /// How long `ssh` may take to connect, in seconds.
 const CONNECT_TIMEOUT: u32 = 10;
+/// Config writes so far, for their temp names.
+static WRITES: AtomicU64 = AtomicU64::new(0);
 
 /// A machine: a name and the `ssh` target it stands for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -115,7 +118,9 @@ pub fn save(path: &Path, machines: &[Machine]) -> Result<(), Error> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("toml.tmp");
+    // A temp name of its own per write, so parallel writers never share one.
+    let n = WRITES.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("toml.{}.{n}.tmp", std::process::id()));
     fs::write(&tmp, text)?;
     fs::rename(&tmp, path)?;
     Ok(())
@@ -346,6 +351,39 @@ mod tests {
         assert_eq!(remove(&path, "box").unwrap().target, "user@box.example");
         assert!(matches!(remove(&path, "box"), Err(Error::NoMachine(_))));
         assert_eq!(load(&path).unwrap().len(), 1);
+    }
+
+    /// R18: parallel writers each get their own temp name; every write lands and none is left behind.
+    #[test]
+    fn parallel_writes_never_share_a_temp_file() {
+        let path = dir("parallel").join("config.toml");
+        std::thread::scope(|s| {
+            for t in 0..8 {
+                let path = &path;
+                s.spawn(move || {
+                    for n in 0..50 {
+                        let m = Machine {
+                            name: format!("m{t}"),
+                            target: format!("h{n}.example"),
+                        };
+                        save(path, &[m]).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(load(&path).unwrap().len(), 1);
+        let left: Vec<_> = fs::read_dir(path.parent().unwrap()).unwrap().collect();
+        assert_eq!(left.len(), 1, "{left:?}");
+    }
+
+    /// R2: the config file the berth release wrote loads as it is.
+    #[test]
+    fn the_berth_release_config_loads() {
+        let path = dir("berth").join("config.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let old = "# berth machines; edit with `berth machine add|rm`.\n[machines]\nbox = \"user@box.example\"\n";
+        fs::write(&path, old).unwrap();
+        assert_eq!(find(&path, "box").unwrap().target, "user@box.example");
     }
 
     #[test]
