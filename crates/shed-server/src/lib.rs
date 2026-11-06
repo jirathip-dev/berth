@@ -281,6 +281,31 @@ fn target(request: &Request, session: &Session) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The read-only terminal an input, resize or attach request names, if any. Every name the
+/// request carries (`terminal` and `name`) is checked, so a second key cannot slip past.
+fn readonly<'a>(method: Method, request: &'a Request, session: &'a Session) -> Option<&'a str> {
+    let input = matches!(
+        method,
+        Method::Send
+            | Method::Keys
+            | Method::Resize
+            | Method::Input
+            | Method::TerminalKeys
+            | Method::TerminalResize
+            | Method::Attach
+    );
+    let mut named: Vec<&str> = ["terminal", "name"]
+        .into_iter()
+        .filter_map(|k| request.params.get(k)?.as_str())
+        .collect();
+    if named.is_empty() {
+        named.extend(session.watching.as_deref());
+    }
+    named
+        .into_iter()
+        .find(|n| input && session.readonly.contains(*n))
+}
+
 /// Answers one connection's requests, line by line, until it closes.
 fn connection(registry: &Arc<Mutex<Registry>>, stream: &UnixStream) {
     let mut session = Session::default();
@@ -385,16 +410,7 @@ fn dispatch(
             "send hello with your version first",
         ));
     }
-    let input = matches!(
-        method,
-        Method::Send
-            | Method::Keys
-            | Method::Resize
-            | Method::Input
-            | Method::TerminalKeys
-            | Method::TerminalResize
-    );
-    if input && let Some(name) = target(request, session).filter(|n| session.readonly.contains(n)) {
+    if let Some(name) = readonly(method, request, session) {
         return Err(RpcError::new(ErrorCode::ReadOnly, name));
     }
     if method == Method::Kill {

@@ -145,7 +145,7 @@ pub enum ErrorCode {
     StillRunning,
     /// The program could not start.
     SpawnFailed,
-    /// The client marked the terminal read-only (`terminal.readonly`): no input, keys or resize.
+    /// The client marked the terminal read-only (`terminal.readonly`): no input, keys, resize or attach.
     ReadOnly,
 }
 
@@ -358,7 +358,7 @@ impl Method {
                 "Resize the terminal, as `resize`; without `terminal`, the one this connection watches."
             }
             Self::ReadOnly => {
-                "Mark the terminal read-only for this connection: from then on, until it closes, the connection's `send`, `keys`, `resize`, `terminal.input`, `terminal.keys` and `terminal.resize` to the terminal are refused with `READONLY`. The connection may resize only the terminals it has not marked."
+                "Mark the terminal read-only for this connection: from then on, until it closes, the connection's `send`, `keys`, `resize`, `attach`, `terminal.input`, `terminal.keys` and `terminal.resize` to the terminal are refused with `READONLY`. The connection may resize only the terminals it has not marked."
             }
         }
     }

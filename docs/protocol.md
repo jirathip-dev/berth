@@ -193,7 +193,7 @@ Resize the terminal, as `resize`; without `terminal`, the one this connection wa
 
 ### `terminal.readonly`
 
-Mark the terminal read-only for this connection: from then on, until it closes, the connection's `send`, `keys`, `resize`, `terminal.input`, `terminal.keys` and `terminal.resize` to the terminal are refused with `READONLY`. The connection may resize only the terminals it has not marked.
+Mark the terminal read-only for this connection: from then on, until it closes, the connection's `send`, `keys`, `resize`, `attach`, `terminal.input`, `terminal.keys` and `terminal.resize` to the terminal are refused with `READONLY`. The connection may resize only the terminals it has not marked.
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"terminal.readonly","params":{"terminal":"agent"}}
