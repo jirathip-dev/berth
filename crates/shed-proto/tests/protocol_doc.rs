@@ -375,7 +375,7 @@ fn line(v: &impl serde::Serialize) -> String {
     serde_json::to_string(v).unwrap()
 }
 
-/// `v` with every object's keys sorted, as serde_json writes them without `preserve_order`: a
+/// `v` with every object's keys sorted, as `serde_json` writes them without `preserve_order`: a
 /// workspace build turns that feature on (the ACP SDK needs it), a `-p shed-proto` build does not.
 fn sorted(v: Value) -> Value {
     match v {
