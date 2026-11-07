@@ -5,11 +5,10 @@
 
 mod common;
 
-use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use common::{Server, eventually, temp_dir};
 use serde_json::{Value, json};
@@ -506,94 +505,6 @@ fn jan_osc_9999_states_are_reported_with_their_source_and_garbled_ones_ignored()
     );
     let read = c.result("read", &json!({"name": "jan"}));
     assert_eq!(read["text"], "ab\nc", "no escape reaches the screen");
-}
-
-/// Runs `shed serve` with `home` as `$HOME` (and the XDG dirs under it) until it answers, then kills
-/// it and returns what it logged.
-fn serve(home: &Path) -> String {
-    let socket = if cfg!(target_os = "macos") {
-        home.join("Library/Caches/shed/shed.sock")
-    } else {
-        home.join("run/shed.sock")
-    };
-    let mut child = Command::new(env!("CARGO_BIN_EXE_shed"))
-        .args(["serve", "--sample", "3600"])
-        .env("HOME", home)
-        .env("XDG_RUNTIME_DIR", home.join("run"))
-        .env("XDG_STATE_HOME", home.join("state"))
-        .env("XDG_CONFIG_HOME", home.join("config"))
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("shed serve starts");
-    eventually("the socket", || UnixStream::connect(&socket).is_ok());
-    child.kill().expect("kill");
-    child.wait().expect("wait");
-    let mut log = String::new();
-    child
-        .stderr
-        .take()
-        .expect("stderr")
-        .read_to_string(&mut log)
-        .expect("log");
-    log
-}
-
-/// The parents of the old and new state dirs (also the config dirs on Linux).
-fn parents(home: &Path) -> Vec<PathBuf> {
-    if cfg!(target_os = "macos") {
-        vec![home.join("Library/Application Support")]
-    } else {
-        vec![home.join("state"), home.join("config")]
-    }
-}
-
-#[test]
-fn serve_moves_the_old_state_dir_once_and_never_over_a_new_one() {
-    // Short, so the socket path fits (macOS: 104 bytes).
-    let home = PathBuf::from(format!("/tmp/shed-mv-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    for p in parents(&home) {
-        std::fs::create_dir_all(p.join("berth")).expect("old dir");
-        std::fs::write(p.join("berth/keep"), "old").expect("old file");
-    }
-
-    let log = serve(&home);
-    for p in parents(&home) {
-        assert!(!p.join("berth").exists(), "{} still there", p.display());
-        assert_eq!(
-            std::fs::read_to_string(p.join("shed/keep")).expect("moved"),
-            "old"
-        );
-        let line = format!(
-            "moved {} to {}",
-            p.join("berth").display(),
-            p.join("shed").display()
-        );
-        assert_eq!(log.matches(&line).count(), 1, "{log}");
-    }
-
-    // A second start has nothing to move.
-    assert!(!serve(&home).contains("moved"));
-
-    // Both present: the old dir stays as it is, with a warning.
-    for p in parents(&home) {
-        std::fs::create_dir_all(p.join("berth")).expect("old dir again");
-        std::fs::write(p.join("berth/keep"), "older").expect("old file again");
-    }
-    let log = serve(&home);
-    for p in parents(&home) {
-        assert_eq!(
-            std::fs::read_to_string(p.join("berth/keep")).expect("left"),
-            "older"
-        );
-        assert_eq!(
-            std::fs::read_to_string(p.join("shed/keep")).expect("kept"),
-            "old"
-        );
-        assert!(log.contains("the old one is left alone"), "{log}");
-    }
-    assert!(!log.contains("moved"), "{log}");
-    let _ = std::fs::remove_dir_all(&home);
 }
 
 /// A connection past `hello`.

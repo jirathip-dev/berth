@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The event fan-out bench (crates/shed-server/tests/bench/fanout.rs) at the base and the head checkouts:
 # the median of 5 interleaved release runs each. Fails if the head is more than 10% slower.
-# A base without the bench gets the head's. Builds go to $BENCH_TARGET/fanout-{base,head}.
+# A base without the bench gets the head's. Builds go to $BENCH_TARGET/fanout-{base,head}. Then, report
+# only, 500 idle events clients and one state change at each side (crates/shed/tests/idle_bench.rs).
 set -euo pipefail
 base=$(cd "$1" && pwd) head=$(cd "$2" && pwd)
 target=${BENCH_TARGET:-$head/target}
@@ -26,6 +27,12 @@ for _ in 1 2 3 4 5; do
     [ -n "$us" ] || { echo "$out"; exit 1; }
     if [ "$side" = base ]; then b+=("$us"); else h+=("$us"); fi
   done
+done
+idle=crates/shed/tests/idle_bench.rs
+[ -f "$base/$idle" ] || cp "$head/$idle" "$base/$idle"
+for side in base head; do
+  (cd "${!side}" && ulimit -n 4096 && CARGO_TARGET_DIR="$target/fanout-$side" cargo test -q -p shed --release \
+    --locked --test idle_bench -- --ignored --nocapture | sed -n "s/^idle /$side: idle /p") || echo "$side: idle failed"
 done
 mb=$(median "${b[@]}") mh=$(median "${h[@]}")
 echo "fan-out median of 5: base $mb us, head $mh us (head/base $((mh * 100 / mb))%)"

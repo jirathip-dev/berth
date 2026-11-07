@@ -487,11 +487,6 @@ fn serve(paths: &Paths, dir: Option<&Path>, detach: bool, sample: f64) -> anyhow
         .ok()
         .filter(|d| !d.is_zero())
         .context("--sample must be a positive number of seconds")?;
-    if dir.is_none() {
-        for line in paths.move_old_dirs()? {
-            eprintln!("shed: {line}");
-        }
-    }
     shed_server::serve(paths, every).context("shed serve")
 }
 

@@ -6,17 +6,16 @@
 //! The bridge reads its PTY in raw mode: a line framed by [`frame`] (`send`, `approve`, `cancel`,
 //! `model`), a plain line typed in `attach` (a prompt), or `Esc` / `Ctrl+C` alone (cancel).
 //!
-//! Only this module is async: its own tokio runtime runs the SDK connection and the session task. The
-//! glue to the sync rest is two threads: one reads the PTY into a channel of [`Input`]s, one drains the
-//! task's outputs into the transcript, the terminal and the server (as notifications).
+//! Its own tokio runtime runs the SDK connection and the session task on this thread and, on one worker
+//! beside it, a task reading the PTY into [`Input`]s and one draining the session's outputs into the
+//! transcript, the terminal and the server (as notifications), a batch at a time.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Read as _, Write as _};
+use std::io::{self, BufWriter, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -37,7 +36,7 @@ use serde_json::Value;
 use shed_proto::{
     AcpSession, ApprovalOption, EmitParams, EventKind, Method, Reported, StateParams,
 };
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::{Client, Error};
@@ -168,7 +167,7 @@ enum FromAgent {
     Config(AcpResult<Vec<SessionConfigOption>>),
 }
 
-/// What the session task hands the writer thread, in order.
+/// What the session task hands the writer task, in order.
 enum Out {
     /// An event; `true` when replayed.
     Emit(EventKind, bool),
@@ -194,7 +193,7 @@ struct Session {
     cx: ConnectionTo<Agent>,
     /// Hands responses to our requests back to the task, in order with the agent's messages.
     back: UnboundedSender<FromAgent>,
-    out: Sender<Out>,
+    out: UnboundedSender<Out>,
     id: SessionId,
     policy: Policy,
     /// Our `session/prompt` requests in flight, by our number.
@@ -217,9 +216,9 @@ struct Session {
 }
 
 impl Session {
-    /// Hands `out` to the writer thread; an error once it is gone.
+    /// Hands `out` to the writer task; an error once it is gone.
     fn send(&self, out: Out) -> AcpResult<()> {
-        let gone = |_| acp_error("the writer thread is gone");
+        let gone = |_| acp_error("the writer task is gone");
         self.out.send(out).map_err(gone)
     }
 
@@ -584,10 +583,10 @@ async fn drive(
     }
 }
 
-/// The writer thread's end: the transcript, the terminal and the server.
+/// The writer task's end: the transcript, the terminal and the server.
 struct Writer {
     transcript: BufWriter<File>,
-    server: Option<Client>,
+    server: Option<tokio::net::UnixStream>,
     socket: PathBuf,
     name: String,
 }
@@ -595,11 +594,11 @@ struct Writer {
 impl Writer {
     /// Writes each output to the transcript, the server and the terminal, flushing (in that order)
     /// whenever the session task has nothing more queued.
-    fn run(mut self, outs: &Receiver<Out>) {
-        while let Ok(first) = outs.recv() {
-            let mut screen = io::stdout().lock();
-            let mut calls = Vec::new();
-            for out in std::iter::once(first).chain(outs.try_iter()) {
+    async fn run(mut self, mut outs: UnboundedReceiver<Out>) {
+        let mut batch = Vec::new();
+        while outs.recv_many(&mut batch, 4096).await > 0 {
+            let (mut screen, mut calls) = (Vec::new(), Vec::new());
+            for out in batch.drain(..) {
                 let name = self.name.clone();
                 let (shown, call) = match out {
                     Out::Emit(kind, replay) => {
@@ -631,23 +630,25 @@ impl Writer {
                 calls.extend(call.unwrap_or_default());
             }
             let _ = self.transcript.flush();
-            self.send(&calls);
-            let _ = screen.flush();
+            self.send(&calls).await;
+            let mut stdout = io::stdout().lock();
+            let _ = stdout.write_all(&screen).and_then(|()| stdout.flush());
         }
     }
 
     /// Sends notification lines, reconnecting once when the connection broke (a server restart). The
     /// agent's session goes on when the server is gone.
-    fn send(&mut self, calls: &[u8]) {
+    async fn send(&mut self, calls: &[u8]) {
         for _ in 0..2 {
             if self.server.is_none() {
-                self.server = Client::connect(&self.socket).ok();
+                let socket = Client::connect(&self.socket).ok().map(|c| c.split().1);
+                let socket = socket.filter(|s| s.set_nonblocking(true).is_ok());
+                self.server = socket.and_then(|s| tokio::net::UnixStream::from_std(s).ok());
             }
             let Some(server) = &mut self.server else {
                 return;
             };
-            let w = &mut server.writer;
-            if w.write_all(calls).and_then(|()| w.flush()).is_ok() {
+            if server.write_all(calls).await.is_ok() {
                 return;
             }
             self.server = None;
@@ -657,11 +658,11 @@ impl Writer {
 
 /// Reads the terminal's input (raw mode) and hands each framed or typed line, and each lone
 /// `Esc` / `Ctrl+C`, to the session task.
-fn read_input(inputs: &UnboundedSender<Input>) {
-    let mut stdin = io::stdin().lock();
+async fn read_input(inputs: UnboundedSender<Input>) {
+    let mut stdin = tokio::io::stdin();
     let mut line = Vec::new();
     let mut buf = [0u8; 4096];
-    while let Ok(n @ 1..) = stdin.read(&mut buf) {
+    while let Ok(n @ 1..) = stdin.read(&mut buf).await {
         for &b in &buf[..n] {
             let input = match b {
                 0x1b | 0x03 => {
@@ -757,16 +758,14 @@ fn run(
     let mcp = std::env::var("SHED_ACP_MCP").unwrap_or_default();
     let mcp = serde_json::from_str::<Vec<Value>>(&mcp).unwrap_or_default();
     let mcp = mcp_servers(&mcp).map_err(Error::Acp)?;
-    let (out, outs) = channel();
+    let (out, outs) = unbounded_channel();
     let writer = Writer {
         transcript: BufWriter::new(open_transcript(state, name)?),
         server: None,
         socket: socket.to_owned(),
         name: name.to_owned(),
     };
-    let writer = std::thread::spawn(move || writer.run(&outs));
     let (typed, inputs) = unbounded_channel();
-    std::thread::spawn(move || read_input(&typed));
     let session = |cx, back| Session {
         cx,
         back,
@@ -786,10 +785,13 @@ fn run(
         mcp,
     };
     let resume = std::env::var("SHED_ACP_RESUME").ok();
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
         .enable_all()
         .build()?;
-    let result = runtime.block_on(async {
+    let writer = runtime.spawn(writer.run(outs));
+    runtime.spawn(read_input(typed));
+    let result = runtime.block_on(async move {
         let (program, args) = cmd
             .split_first()
             .ok_or_else(|| Error::Acp("empty agent command".to_owned()))?;
@@ -843,8 +845,10 @@ fn run(
             .map_err(|e| Error::Acp(e.to_string()))?;
         Ok(child.wait().await?.code().unwrap_or(1))
     });
-    // The task's sender is gone with it: the writer drains what is queued and ends.
-    let _ = writer.join();
+    // The session's sender is gone with it: the writer drains what is queued and ends. The stdin read
+    // never ends on its own, so the runtime does not wait for it.
+    let _ = runtime.block_on(writer);
+    runtime.shutdown_background();
     result
 }
 

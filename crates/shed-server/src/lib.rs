@@ -1,7 +1,7 @@
 //! shed's per-user server: the socket, JSON-RPC, the events stream and machines over SSH.
 //!
 //! [`serve`] owns the terminals and answers newline-delimited JSON-RPC 2.0 ([`shed_proto`]) on a
-//! Unix socket, one thread per connection. [`Client`] is the other end.
+//! Unix socket, one tokio task per connection. [`Client`] is the other end.
 #![forbid(unsafe_code)]
 
 pub mod acp;
@@ -18,7 +18,7 @@ use std::fs;
 use std::io::{self, BufRead as _, BufReader, BufWriter, Read as _, Write as _};
 use std::net::Shutdown;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -35,6 +35,7 @@ use serde_json::Value;
 use shed_core::proctree::{self, ProcessTable as _};
 use shed_core::{Pattern, STATES, Terminal, Wake};
 pub use shed_proto as proto;
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
 /// Errors from the server and the client.
 #[derive(Debug, thiserror::Error)]
@@ -148,55 +149,33 @@ impl Paths {
             config: xdg("XDG_CONFIG_HOME", ".config").join("shed/config.toml"),
         })
     }
-
-    /// The one-time move from the old name: each `shed` dir of the state and config files that does
-    /// not exist yet takes over a `berth` dir beside it, by rename; nothing is deleted. Returns a line
-    /// per old dir: moved, or left alone because both exist.
-    ///
-    /// # Errors
-    /// [`Error::Io`] when a rename fails.
-    pub fn move_old_dirs(&self) -> Result<Vec<String>, Error> {
-        let mut dirs: Vec<&Path> = [&self.state, &self.config]
-            .into_iter()
-            .filter_map(|p| p.parent())
-            .filter(|d| d.file_name() == Some("shed".as_ref()))
-            .collect();
-        dirs.dedup();
-        let mut lines = Vec::new();
-        for new in dirs {
-            let old = new.with_file_name("berth");
-            if !old.is_dir() {
-                continue;
-            }
-            let (from, to) = (old.display(), new.display());
-            if new.exists() {
-                lines.push(format!(
-                    "both {from} and {to} exist; the old one is left alone"
-                ));
-            } else {
-                fs::rename(&old, new)?;
-                lines.push(format!("moved {from} to {to}"));
-            }
-        }
-        Ok(lines)
-    }
 }
 
-fn lock(m: &Mutex<Registry>) -> MutexGuard<'_, Registry> {
+type Shared = Arc<Mutex<Registry>>;
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// `f` on the blocking pool.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, RpcError> {
+    let joined = tokio::task::spawn_blocking(f).await;
+    joined.map_err(|e| RpcError::new(ErrorCode::Internal, e))
 }
 
 /// Refreshes the registry whenever `term`'s reported state changes and once it exits, so the events
 /// stream without anyone asking.
-fn watch(registry: &Arc<Mutex<Registry>>, term: Arc<Terminal>) {
+fn watch(registry: &Shared, term: Arc<Terminal>) {
     let registry = Arc::clone(registry);
-    std::thread::spawn(move || {
+    tokio::spawn(async move {
         loop {
             // Read before the refresh, so a change in between wakes the wait at once.
             let last = term.report();
             let _ = lock(&registry).refresh();
             if !matches!(
-                term.wait_until(|t| t.report() != last, None),
+                term.wait_until(|t| t.report() != last, None).await,
                 Ok(Wake::Matched)
             ) {
                 let _ = lock(&registry).refresh();
@@ -207,18 +186,17 @@ fn watch(registry: &Arc<Mutex<Registry>>, term: Arc<Terminal>) {
 }
 
 /// Samples every running tree's memory and CPU every `every`.
-fn sample(registry: &Mutex<Registry>, every: Duration) {
-    let table = proctree::system();
+async fn sample(registry: Shared, every: Duration) {
     loop {
-        std::thread::sleep(every);
-        if let Ok(procs) = table.list() {
-            lock(registry).sample(&procs, Instant::now());
+        tokio::time::sleep(every).await;
+        if let Ok(Ok(procs)) = blocking(|| proctree::system().list()).await {
+            lock(&registry).sample(&procs, Instant::now());
         }
     }
 }
 
 /// Keeps a machine sample (with the terminal counts) when one is due; the wait until the next one is.
-fn record_stats(registry: &Mutex<Registry>) -> Duration {
+async fn record_stats(registry: &Mutex<Registry>) -> Duration {
     let (wait, dir) = {
         let reg = lock(registry);
         (reg.stats.until_due(stats::unix_now()), reg.dir())
@@ -226,7 +204,9 @@ fn record_stats(registry: &Mutex<Registry>) -> Duration {
     if wait > 0 {
         return Duration::from_secs(wait);
     }
-    let sample = stats::system(&dir);
+    let Ok(sample) = blocking(move || stats::system(&dir)).await else {
+        return Duration::from_secs(1);
+    };
     let mut reg = lock(registry);
     let _ = reg.refresh();
     reg.record(sample);
@@ -258,20 +238,29 @@ pub fn serve(paths: &Paths, sample_every: Duration) -> Result<(), Error> {
         }
         locked => locked.map_err(io::Error::from)?,
     }
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(4));
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()?;
+    runtime.block_on(listen(paths, sample_every))
+}
+
+/// [`serve`] on its runtime, past the lock.
+async fn listen(paths: &Paths, sample_every: Duration) -> Result<(), Error> {
     let registry = Arc::new(Mutex::new(Registry::load(&paths.state)?));
     for term in lock(&registry).running() {
         watch(&registry, term);
     }
-    let sampler = Arc::clone(&registry);
-    std::thread::spawn(move || sample(&sampler, sample_every));
+    tokio::spawn(sample(Arc::clone(&registry), sample_every));
     // One machine sample now, then a timer to each next one.
-    let first = record_stats(&registry);
+    let first = record_stats(&registry).await;
     let recorder = Arc::clone(&registry);
-    std::thread::spawn(move || {
+    tokio::spawn(async move {
         let mut wait = first;
         loop {
-            std::thread::sleep(wait);
-            wait = record_stats(&recorder);
+            tokio::time::sleep(wait).await;
+            wait = record_stats(&recorder).await;
         }
     });
     if let Some(dir) = paths.socket.parent() {
@@ -284,7 +273,7 @@ pub fn serve(paths: &Paths, sample_every: Duration) -> Result<(), Error> {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
         _ => {}
     }
-    let listener = UnixListener::bind(&paths.socket)?;
+    let listener = tokio::net::UnixListener::bind(&paths.socket)?;
     fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
     // The one stdout line, `shed ready <version> <socket>`, that a client starting the server waits for.
     let _ = writeln!(
@@ -292,12 +281,10 @@ pub fn serve(paths: &Paths, sample_every: Duration) -> Result<(), Error> {
         "shed ready {VERSION} {}",
         paths.socket.display()
     );
-    for stream in listener.incoming() {
-        let stream = stream?;
-        let registry = Arc::clone(&registry);
-        std::thread::spawn(move || connection(&registry, &stream));
+    loop {
+        let (stream, _) = listener.accept().await?;
+        tokio::spawn(connection(Arc::clone(&registry), stream));
     }
-    Ok(())
 }
 
 /// One connection's state.
@@ -307,8 +294,6 @@ struct Session {
     hello: bool,
     /// An `attach` or `events` just answered: the redraw or replay, and the stream to write next.
     stream: Option<Stream>,
-    /// The connection streams output or events; responses are no longer written.
-    streaming: bool,
     /// The terminal `screen.watch` streams.
     watching: Option<String>,
     /// The terminals `terminal.readonly` marked: their input is refused.
@@ -336,42 +321,37 @@ fn readonly<'a>(method: Method, request: &'a Request, session: &'a Session) -> O
     (named.into_iter().flatten()).find(|n| input && session.readonly.contains(*n))
 }
 
-/// Answers one connection's requests, line by line, until it closes.
-fn connection(registry: &Arc<Mutex<Registry>>, stream: &UnixStream) {
+/// Answers one connection's requests, line by line, until it closes. After an `attach`, `events` or
+/// `screen.watch` a task owns the write half and streams; it ends when the read half does.
+async fn connection(registry: Shared, stream: tokio::net::UnixStream) {
     let mut session = Session::default();
-    let mut out = BufWriter::new(stream);
-    for line in BufReader::new(stream).lines() {
-        let Ok(line) = line else { return };
+    let (read, out) = stream.into_split();
+    // Aborted on drop: the stream ends with the read half.
+    let (mut out, mut streaming) = (Some(out), tokio::task::JoinSet::new());
+    let mut lines = tokio::io::BufReader::new(read).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(response) = respond(registry, &mut session, &line)
-            && !session.streaming
-        {
-            let written = serde_json::to_writer(&mut out, &response).map_err(io::Error::from);
-            if written
-                .and_then(|()| out.write_all(b"\n"))
-                .and_then(|()| out.flush())
-                .is_err()
-            {
+        let response = respond(&registry, &mut session, &line).await;
+        if let (Some(response), Some(out)) = (response, &mut out) {
+            // A response (ids, values and strings) always serialises.
+            let mut bytes = serde_json::to_vec(&response).unwrap_or_default();
+            bytes.push(b'\n');
+            if out.write_all(&bytes).await.is_err() {
                 return;
             }
         }
-        if let Some(pump) = session.stream.take() {
-            let Ok(socket) = stream.try_clone() else {
-                return;
-            };
-            session.streaming = true;
-            std::thread::spawn(move || {
-                pump(&mut BufWriter::new(&socket));
-                let _ = socket.shutdown(Shutdown::Both);
-            });
+        if let Some(stream) = session.stream.take()
+            && let Some(out) = out.take()
+        {
+            streaming.spawn(stream.run(out));
         }
     }
 }
 
 /// The response to one request line; `None` for a notification.
-fn respond(registry: &Arc<Mutex<Registry>>, session: &mut Session, line: &str) -> Option<Response> {
+async fn respond(registry: &Shared, session: &mut Session, line: &str) -> Option<Response> {
     let value: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {
@@ -395,7 +375,7 @@ fn respond(registry: &Arc<Mutex<Registry>>, session: &mut Session, line: &str) -
             ));
         }
     };
-    let result = dispatch(registry, session, &request);
+    let result = dispatch(registry, session, &request).await;
     let id = request.id?;
     Some(match result {
         Ok(v) => Response::ok(id, v),
@@ -415,8 +395,8 @@ fn json<T: Serialize>(value: &T) -> Result<Value, RpcError> {
     serde_json::to_value(value).map_err(|e| RpcError::new(ErrorCode::Internal, e))
 }
 
-fn dispatch(
-    registry: &Arc<Mutex<Registry>>,
+async fn dispatch(
+    registry: &Shared,
     session: &mut Session,
     request: &Request,
 ) -> Result<Value, RpcError> {
@@ -441,25 +421,23 @@ fn dispatch(
     }
     if method == Method::Kill {
         let Target { name } = params(request)?;
-        let mut reg = lock(registry);
-        reg.refresh()?;
-        let Some(term) = reg.mark_kill(&name)? else {
-            return json(&reg.get(&name)?);
+        let term = lock(registry).mark_kill(&name)?;
+        let Some(term) = term else {
+            return json(&lock(registry).get(&name)?);
         };
-        drop(reg);
-        let status = term
-            .kill(registry::GRACE)
-            .map_err(|e| RpcError::new(ErrorCode::Internal, e))?;
+        let killing = Arc::clone(&term);
+        let status = blocking(move || killing.kill(registry::GRACE)).await?;
+        let status = status.map_err(|e| RpcError::new(ErrorCode::Internal, e))?;
         return json(&lock(registry).killed(&name, &term, status)?);
     }
     if method == Method::Wait {
-        return json(&wait(registry, &params(request)?)?);
+        return json(&wait(registry, &params(request)?).await?);
     }
     if method == Method::MachineStats {
         let p: StatsParams = params(request)?;
         let dir = lock(registry).dir();
         // Sampled outside the lock: it runs `df` (and `sysctl` on macOS).
-        let now = stats::system(&dir);
+        let now = blocking(move || stats::system(&dir)).await?;
         let mut reg = lock(registry);
         reg.refresh()?;
         return json(&reg.machine_stats(now, p.since));
@@ -493,7 +471,7 @@ fn dispatch(
         Method::ScreenWatch => {
             let p: WatchParams = params(request)?;
             let term = Arc::clone(reg.live(&p.terminal)?);
-            session.stream = Some(registry::stream(Vec::new(), screen::watch(term, p.since)));
+            session.stream = Some(Stream::Screen(term, p.since));
             session.watching = Some(p.terminal);
             Ok(empty())
         }
@@ -527,9 +505,9 @@ fn empty() -> Value {
     Value::Object(serde_json::Map::new())
 }
 
-/// `wait`: blocks this connection, not the registry, until a state or output matches, the program
+/// `wait`: holds this connection, not the registry, until a state or output matches, the program
 /// exits or the timeout passes.
-fn wait(registry: &Mutex<Registry>, p: &WaitParams) -> Result<WaitResult, RpcError> {
+async fn wait(registry: &Mutex<Registry>, p: &WaitParams) -> Result<WaitResult, RpcError> {
     let bad = |e: &dyn std::fmt::Display| RpcError::new(ErrorCode::InvalidParams, e);
     if p.until.is_empty() && p.output.is_none() {
         return Err(bad(&"give until, output or both"));
@@ -564,6 +542,7 @@ fn wait(registry: &Mutex<Registry>, p: &WaitParams) -> Result<WaitResult, RpcErr
             };
             match term
                 .wait_until(done, deadline)
+                .await
                 .map_err(|e| RpcError::new(ErrorCode::Internal, e))?
             {
                 Wake::Matched => WaitOutcome::Matched,

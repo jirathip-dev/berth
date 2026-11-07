@@ -72,8 +72,8 @@ protocol over stdin/stdout for SSH.
 ## Constraints
 
 - **Rust, ≤ 6,700 non-test lines in `src/`** (CI-enforced, like herdsman).
-- **Few dependencies:** a PTY crate, a VT parser for the screen, serde/serde_json, clap. No async runtime unless a
-  measured need appears.
+- **Few dependencies:** a PTY crate, a VT parser for the screen, serde/serde_json, clap. tokio for the server
+  and the ACP bridge ([decision 0004](docs/decisions/0004-tokio.md)).
 - **Fast:** every CLI call that doesn't wait is < 20 ms locally.
 - **Public repo:** placeholders only in docs and tests, no setup-specific names.
 
