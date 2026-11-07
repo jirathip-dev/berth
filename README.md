@@ -86,13 +86,14 @@ shed runs them as a second kind of terminal, through the same API:
 | Command | What it does |
 |---|---|
 | `shed agents` / `shed agents add <id>` / `shed agents rm <id>` | The installed ACP agents. `add` installs the version the [ACP registry](https://agentclientprotocol.com) lists now (its binary, `npx` or `uvx` entry), pinned; nothing upgrades it. |
-| `shed run --acp <id> [--policy allow\|deny\|ask] [--cwd D] [--label k=v…]` | Start the agent's ACP adapter on stdio: `initialize`, `session/new` (no MCP servers). |
+| `shed run --acp <id> [--policy allow\|deny\|ask] [--resume S] [--cwd D] [--label k=v…]` | Start the agent's ACP adapter on stdio: `initialize`, `session/new` (no MCP servers), or with `--resume` `session/load` of session S (`shed get`'s `session.id`). |
 | `shed send <t> <text>` | `session/prompt`; the state is `working` until the turn ends, then `done` (note: the stop reason). |
 | `shed approve <t> <option>` | Answer a permission request (state `blocked`); `--policy` answers them instead. |
 | `shed cancel <t>` / `shed keys <t> esc` | `session/cancel`. |
+| `shed model <t> <id>` | Switch the model (one of `shed get`'s `session.models`) through the agent's `model` config option. |
 | `shed read <t>` | The transcript as text: prompts, one line per tool call, final replies. |
 
-`shed events` adds `turn`, `text`, `tool_call`, `plan`, `mode`, `approval_request`, `approved` and `reply`, and
+`shed events` adds `turn`, `text`, `tool_call`, `plan`, `mode`, `approval_request`, `approved`, `reply` and `session`, and
 `shed wait --until done` is exact. The PTY mode stays for agents without ACP. shed never handles provider
 credentials: each agent logs in its own way. See [docs/acp.md](docs/acp.md), including the Claude adapter caveat.
 

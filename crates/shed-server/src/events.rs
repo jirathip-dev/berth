@@ -39,12 +39,18 @@ fn line(event: &Event) -> Line {
 impl Events {
     /// Numbers, keeps and streams one event of terminal `name`.
     pub(crate) fn emit(&mut self, name: &str, labels: &Labels, kind: EventKind) {
+        self.emit_as(name, labels, kind, false);
+    }
+
+    /// [`Self::emit`], flagged `replay` for a resumed ACP session's history.
+    pub(crate) fn emit_as(&mut self, name: &str, labels: &Labels, kind: EventKind, replay: bool) {
         self.seq += 1;
         let event = Event {
             seq: self.seq,
             name: name.to_owned(),
             labels: labels.clone(),
             kind,
+            replay,
         };
         let bytes = line(&event);
         self.subs

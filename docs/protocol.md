@@ -16,7 +16,8 @@ A terminal, as `run`, `ls`, `get`, `kill` and `rm` return it: `state` is `runnin
 the exit status (128 + N for signal N), `null` while running or when the program was lost in a server
 restart; `pid` is set while running; `reported` is the state the program last reported (absent until
 then); `idle_after` is set when the `idle` fallback is on; `resources` is the process tree's memory
-(MiB) and CPU (percent of one core) at the last sample, while running.
+(MiB) and CPU (percent of one core) at the last sample, while running; an ACP terminal's `session` is its
+agent session (`id`, for `run`'s `resume`; the current `model` and the `models`, `[id, name]`).
 
 ## Methods
 
@@ -209,11 +210,20 @@ The machine's health now: load per CPU, memory pressure (percent of memory not a
 {"jsonrpc":"2.0","id":1,"result":{"at":1762416090,"cpus":8,"disk_free_mb":120000,"history":[{"at":1762416060,"cpus":8,"disk_free_mb":120000,"load_per_cpu":0.25,"mem_pressure_pct":42,"swap_used_mb":512,"terminals":{"exited":1,"working":2},"uptime_s":86400}],"load_per_cpu":0.25,"mem_pressure_pct":42,"swap_used_mb":512,"terminals":{"exited":1,"working":2},"uptime_s":86400}}
 ```
 
+### `acp.model`
+
+Switch an ACP terminal's model to one of its `session.models`: its bridge asks the agent (`session/set_config_option`, the `model` option) and emits `session` with the new `model`.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"acp.model","params":{"model":"haiku","name":"agent"}}
+{"jsonrpc":"2.0","id":1,"result":{}}
+```
+
 ## Events
 
 An event names its terminal, carries its labels and counts up in `seq`; `event` is `started`, `state` (the reported state changed), `exited` (by itself, with its `code`), `killed` (by `kill`) or `resources` (memory or CPU moved by more than 10 % since the last one).
 
-An ACP terminal (`shed run --acp`) adds its agent's events, emitted by its bridge: `turn` (a prompt), `text` (a reply chunk), `tool_call` (started or changed), `plan`, `mode`, `approval_request` (answer with `shed approve`), `approved` and `reply` (the turn's whole reply and its `stop_reason`).
+An ACP terminal (`shed run --acp`) adds its agent's events, emitted by its bridge: `turn` (a prompt), `text` (a reply chunk), `tool_call` (started or changed), `plan`, `mode`, `approval_request` (answer with `shed approve`), `approved`, `reply` (the turn's whole reply and its `stop_reason`) and `session` (the session is ready, or its model changed). A resumed session's history (`run` with `resume`) comes first, its events marked `"replay": true` so a client does not count them as new.
 
 ```json
 {"seq":1,"name":"build","labels":{"issue":"7","role":"impl"},"event":"started"}
@@ -229,6 +239,7 @@ An ACP terminal (`shed run --acp`) adds its agent's events, emitted by its bridg
 {"seq":11,"name":"build","labels":{"issue":"7","role":"impl"},"event":"approval_request","tool":"Edit src/lib.rs","options":[{"id":"allow","name":"Allow","kind":"allow_once"},{"id":"reject","name":"Reject","kind":"reject_once"}]}
 {"seq":12,"name":"build","labels":{"issue":"7","role":"impl"},"event":"approved","option":"allow"}
 {"seq":13,"name":"build","labels":{"issue":"7","role":"impl"},"event":"reply","text":"Fixed; all 12 tests pass.","stop_reason":"end_turn"}
+{"seq":14,"name":"build","labels":{"issue":"7","role":"impl"},"event":"session","id":"sess_1","model":"opus","models":[["opus","Opus"],["haiku","Haiku"]]}
 ```
 
 ## Screen updates

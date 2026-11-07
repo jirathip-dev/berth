@@ -24,9 +24,9 @@ use shed_server::acp::{self, Input, Policy};
 use shed_server::agents;
 use shed_server::machines::{self, Machine};
 use shed_server::proto::{
-    Event, EventKind, EventsParams, KeysParams, LsParams, MachineStats, Method, ReadParams,
-    ReadResult, Reported, RunParams, SendParams, State, StateParams, StatsParams, Target,
-    TerminalInfo, WaitOutcome, WaitParams, WaitResult,
+    Event, EventKind, EventsParams, KeysParams, LsParams, MachineStats, Method, ModelParams,
+    ReadParams, ReadResult, Reported, RunParams, SendParams, State, StateParams, StatsParams,
+    Target, TerminalInfo, WaitOutcome, WaitParams, WaitResult,
 };
 use shed_server::{Client, Paths};
 
@@ -160,6 +160,13 @@ enum Command {
     Cancel {
         /// The terminal.
         name: String,
+    },
+    /// ACP: switch the session's model to one of `shed get`'s `session.models`.
+    Model {
+        /// The terminal.
+        name: String,
+        /// The model id.
+        model: String,
     },
     /// List the installed ACP agents, or add or remove one.
     Agents {
@@ -330,6 +337,9 @@ struct RunArgs {
     /// ACP: answer permission requests `allow`, `deny`, or `ask` (wait for `shed approve`).
     #[arg(long, requires = "acp", value_parser = ["allow", "deny", "ask"], default_value = "ask")]
     policy: String,
+    /// ACP: resume the agent's session ID (`shed get`'s `session.id`) instead of starting one.
+    #[arg(long, value_name = "ID", requires = "acp")]
+    resume: Option<String>,
     /// The program and its arguments.
     #[arg(last = true, required_unless_present = "acp")]
     cmd: Vec<String>,
@@ -407,15 +417,12 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             print(json, &read, || format!("{}{end}", read.text))?;
         }
         Command::Send { name, text } => send(&server, json, name, text)?,
-        Command::Approve { name, option } => {
-            print(
-                json,
-                &to_acp(&server, name, &Input::Approve(option))?,
-                String::new,
-            )?;
-        }
-        Command::Cancel { name } => {
-            print(json, &to_acp(&server, name, &Input::Cancel)?, String::new)?;
+        Command::Approve { name, option } => to_acp(&server, json, name, &Input::Approve(option))?,
+        Command::Cancel { name } => to_acp(&server, json, name, &Input::Cancel)?,
+        Command::Model { name, model } => {
+            let params = ModelParams { name, model };
+            let done: Value = server.connect(None)?.call(Method::Model, &params)?;
+            print(json, &done, String::new)?;
         }
         Command::Agents { action } => agents_cmd(&paths, json, action)?,
         Command::AcpBridge {
@@ -510,6 +517,7 @@ fn run_terminal(server: &Server, json: bool, args: RunArgs) -> anyhow::Result<()
         idle_after: args.idle_after,
         cmd,
         acp: args.acp,
+        resume: args.resume,
     };
     let mut client = server.connect(Some(args.autostart))?;
     let info: TerminalInfo = client.call(Method::Run, &params)?;
@@ -608,14 +616,15 @@ fn bridge_cmd(
 }
 
 /// Delivers `input` to an ACP terminal's bridge.
-fn to_acp(server: &Server, name: String, input: &Input) -> anyhow::Result<Value> {
+fn to_acp(server: &Server, json: bool, name: String, input: &Input) -> anyhow::Result<()> {
     let mut client = server.connect(None)?;
     let info: TerminalInfo = client.call(Method::Get, &Target { name: name.clone() })?;
     if info.acp.is_none() {
         bail!("{name} is not an ACP terminal (shed run --acp)");
     }
     let text = acp::frame(input);
-    Ok(client.call(Method::Send, &SendParams { name, text })?)
+    let done: Value = client.call(Method::Send, &SendParams { name, text })?;
+    print(json, &done, String::new)
 }
 
 /// `shed agents [add|rm]`.

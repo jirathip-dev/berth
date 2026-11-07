@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Server responses list object keys in field order instead of alphabetically (the SDK turns on serde_json's
+  `preserve_order`). The JSON is the same.
+
 - Renamed from berth to shed: the crates (`shed`, `shed-core`, `shed-proto`, `shed-server`), the binary,
   the socket (`shed.sock`), the state and config dirs, the service units (`dev.shed.serve`,
   `shed.service`) and the docs. On its first start on the per-user paths, `shed serve` moves an existing
@@ -28,6 +31,20 @@ All notable changes to this project are documented here. The format follows
   fail on a shared one.
 
 ### Added
+
+- ACP on the official async SDK (`agent-client-protocol` 5.0.0, on a tokio runtime the bridge owns): every ACP
+  message is a typed SDK message, and an unknown `session/update` kind is shown and skipped. Events go to the
+  server as notifications, batched, so a 1,000-update turn reaches a socket client about 3× sooner.
+- `shed run --acp <id> --resume <session>` (the `run` method's `resume`) loads a session with `session/load`
+  when the agent advertises `loadSession` (else the terminal ends as `error`). The replayed history's events
+  carry `"replay": true`. A new `session` event, also kept as the terminal's `session` (saved across restarts),
+  gives the session id, the current `model` and the `models` (`[id, name]`).
+- `shed model <t> <id>` and the `acp.model` method switch the model through the agent's `model` config option
+  (`session/set_config_option`; SDK 5 has no `session/set_model`).
+- cooee: pin shed at this release for `run.resume`, `acp.model`, the `session` event and `TerminalInfo.session`,
+  and `Event.replay` / `EmitParams.replay`.
+- The ACP throughput bench (`scripts/bench-acp.sh`, CI job `bench-acp`): 1,000 updates through the bridge at the
+  base and the head, failing over 10% slower, plus the head's 1,000-update replay time.
 
 - `shed watch [--label k=v] [--on M]`: a full-screen live list of the terminals (a state dot, name, fleet,
   issue and role, age; grouped by machine and fleet; an exited one stays dim for 60 s) beside a read-only
