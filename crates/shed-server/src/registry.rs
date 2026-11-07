@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 use shed_core::proctree::{self, ProcessInfo};
 use shed_core::{History, Report, STATES, Size, Terminal};
 use shed_proto::{
-    EmitParams, ErrorCode, EventKind, EventsParams, KeysParams, LsParams, MachineStats, ReadParams,
-    ReadResult, Reported, ResizeParams, Resources, RpcError, RunParams, Sample, SendParams, State,
-    StateParams, TerminalInfo,
+    EmitParams, ErrorCode, EventKind, EventsParams, KeysParams, LsParams, MachineStats,
+    ModelParams, ReadParams, ReadResult, Reported, ResizeParams, Resources, RpcError, RunParams,
+    Sample, SendParams, State, StateParams, TerminalInfo,
 };
 
 use crate::events::Events;
@@ -134,9 +134,11 @@ fn spawn(
     name: &str,
     idle_after: Option<u64>,
     history: &History,
+    resume: Option<&str>,
 ) -> Result<Terminal, shed_core::Error> {
     // $BERTH, the old name, stays for one release.
-    let env = [("SHED", name), ("BERTH", name)];
+    let resume = resume.map(|id| ("SHED_ACP_RESUME", id));
+    let env = [("SHED", name), ("BERTH", name)].into_iter().chain(resume);
     let term = Terminal::spawn_with(cmd, cwd, env, SIZE, history)?;
     term.set_idle_after(idle_after.map(Duration::from_secs));
     Ok(term)
@@ -170,7 +172,7 @@ impl Registry {
                 if info.keep {
                     let cmd = vec![shell.clone()];
                     let history = history(path, &info.name);
-                    term = spawn(&cmd, &info.cwd, &info.name, info.idle_after, &history)
+                    term = spawn(&cmd, &info.cwd, &info.name, info.idle_after, &history, None)
                         .ok()
                         .map(Arc::new);
                     if term.is_some() {
@@ -409,7 +411,8 @@ impl Registry {
         if let Some(log) = &history.log {
             let _ = fs::remove_file(log);
         }
-        let term = spawn(&p.cmd, &p.cwd, &name, p.idle_after, &history)
+        let resume = p.resume.as_deref();
+        let term = spawn(&p.cmd, &p.cwd, &name, p.idle_after, &history, resume)
             .map_err(|e| RpcError::new(ErrorCode::SpawnFailed, format!("{name}: {e}")))?;
         let info = TerminalInfo {
             name: name.clone(),
@@ -424,6 +427,7 @@ impl Registry {
             idle_after: p.idle_after,
             resources: None,
             acp: p.acp,
+            session: None,
         };
         self.events.emit(&name, &info.labels, EventKind::Started);
         let entry = Entry::new(info.clone(), Some(Arc::new(term)));
@@ -552,9 +556,28 @@ impl Registry {
             ));
         }
         self.live(&p.name)?;
-        let labels = self.entry(&p.name)?.info.labels.clone();
-        self.events.emit(&p.name, &labels, p.kind);
+        let entry = self.entries.get_mut(&p.name);
+        let info = &mut entry.ok_or_else(|| not_found(&p.name))?.info;
+        let session = match &p.kind {
+            EventKind::Session(s) => info.session.replace(s.clone()).is_none_or(|old| old != *s),
+            _ => false,
+        };
+        let labels = info.labels.clone();
+        self.events.emit_as(&p.name, &labels, p.kind, p.replay);
+        // Saved, so a lost terminal's session id outlives a restart for `run --resume`.
+        if session {
+            self.save().map_err(internal)?;
+        }
         Ok(())
+    }
+
+    /// `acp.model`: asks an ACP terminal's bridge to switch the agent's model.
+    pub(crate) fn model(&self, p: ModelParams) -> Result<(), RpcError> {
+        let why = format!("{} is not an ACP terminal", p.name);
+        let acp = self.entry(&p.name)?.info.acp.as_ref();
+        acp.ok_or_else(|| RpcError::new(ErrorCode::InvalidParams, why))?;
+        let text = crate::acp::frame(&crate::acp::Input::Model(p.model));
+        self.send(&SendParams { name: p.name, text })
     }
 
     /// The terminal to wait on (`None` when lost in a restart) and its info; the caller waits without

@@ -229,7 +229,7 @@ fn a_turn_with_an_approval_matches_the_golden_event_log() {
     let events = events.join("\n");
     writeln!(log, "$ shed events --label run=golden --since 0\n{events}").expect("write");
     let transcript = std::fs::read_to_string(dir.join("acp/a.jsonl")).expect("the transcript");
-    assert_eq!(transcript.lines().count(), 13, "{transcript}");
+    assert_eq!(transcript.lines().count(), 14, "{transcript}");
 
     let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/acp.txt");
     if std::env::var_os("SHED_BLESS").is_some() {
@@ -447,5 +447,155 @@ fn the_watchdog_ends_a_silent_turn_but_not_a_busy_one() {
     assert_eq!(
         ok(&dir, &["read", "w"]),
         "> busy\n[tool] Build (completed)\nbusy done\n> silent\n"
+    );
+}
+
+/// Starts the fake agent as terminal `name` keeping its history in `history`, `extra` passed to `run`.
+fn start_with_history(dir: &Path, name: &str, history: &Path, extra: &[&str]) {
+    let agent = fake_agent();
+    let label = format!("run={name}");
+    let run = ["run", "--name", name, "--label", &label, "--acp", "fake"];
+    let cmd = ["--", "python3", agent.to_str().expect("utf-8"), "--history"];
+    let history = history.to_str().expect("utf-8");
+    ok(dir, &[&run[..], extra, &cmd, &[history]].concat());
+}
+
+#[test]
+fn resume_replays_the_history_once_marked_replay() {
+    let dir = temp_dir("acp-resume");
+    let history = dir.join("history.jsonl");
+    let server = Server::start(&dir);
+    start_with_history(&dir, "r1", &history, &[]);
+    ok(
+        &dir,
+        &[
+            "wait",
+            "r1",
+            "--output",
+            "ACP session ready",
+            "--timeout",
+            "10",
+        ],
+    );
+    for prompt in ["hi", "again"] {
+        ok(&dir, &["send", "r1", prompt]);
+        ok(&dir, &["wait", "r1", "--until", "done", "--timeout", "10"]);
+    }
+    // A server restart loses the terminal but keeps its session id.
+    drop(server);
+    let _server = Server::start(&dir);
+    let info: Value = serde_json::from_str(&ok(&dir, &["get", "r1"])).expect("JSON");
+    assert_eq!(
+        (&info["state"], &info["session"]["id"]),
+        (&json!("exited"), &json!("sess-1"))
+    );
+
+    start_with_history(&dir, "r2", &history, &["--resume", "sess-1"]);
+    ok(
+        &dir,
+        &[
+            "wait",
+            "r2",
+            "--output",
+            "ACP session ready",
+            "--timeout",
+            "10",
+        ],
+    );
+    ok(&dir, &["send", "r2", "more"]);
+    ok(&dir, &["wait", "r2", "--until", "done", "--timeout", "10"]);
+    let events: Vec<Value> = events_until(&dir, "r2", is_state("done"))
+        .iter()
+        .map(|l| serde_json::from_str(l).expect("JSON"))
+        .collect();
+    let acp: Vec<Value> = events
+        .iter()
+        .filter(|e| ["turn", "reply"].contains(&e["event"].as_str().unwrap_or_default()))
+        .map(|e| {
+            json!([
+                e["event"],
+                e.get("prompt").or(e.get("text")),
+                e.get("replay")
+            ])
+        })
+        .collect();
+    assert_eq!(
+        acp,
+        [
+            json!(["turn", "hi", true]),
+            json!(["reply", "you said: hi", true]),
+            json!(["turn", "again", true]),
+            json!(["reply", "you said: again", true]),
+            json!(["turn", "more", null]),
+            json!(["reply", "you said: more", null]),
+        ]
+    );
+    assert_eq!(
+        ok(&dir, &["read", "r2"]),
+        "> hi\nyou said: hi\n> again\nyou said: again\n> more\nyou said: more\n"
+    );
+}
+
+#[test]
+fn resume_is_refused_without_load_session() {
+    let dir = temp_dir("acp-noload");
+    let _server = Server::start(&dir);
+    let agent = fake_agent();
+    let agent = agent.to_str().expect("utf-8");
+    let run = [
+        "run", "--name", "n", "--acp", "fake", "--resume", "sess-1", "--",
+    ];
+    ok(&dir, &[&run[..], &["python3", agent]].concat());
+    ok(&dir, &["wait", "n", "--until", "error", "--timeout", "10"]);
+    assert_eq!(
+        reported(&dir, "n"),
+        json!({"state": "error", "note": "acp: the agent cannot resume a session (no loadSession)"})
+    );
+}
+
+#[test]
+fn a_model_switch_is_reported_and_the_next_turn_uses_it() {
+    let dir = temp_dir("acp-model");
+    let _server = Server::start(&dir);
+    start_fake(&dir, "m", "fake");
+    let session = || {
+        let info: Value = serde_json::from_str(&ok(&dir, &["get", "m"])).expect("JSON");
+        info["session"].clone()
+    };
+    let models = json!([["fast", "Fast"], ["smart", "Smart"]]);
+    let first = json!({"id": "sess-1", "model": "fast", "models": models});
+    common::eventually("the session", || session() == first);
+    ok(&dir, &["model", "m", "smart"]);
+    common::eventually("the switch", || session()["model"] == "smart");
+    ok(&dir, &["send", "m", "hi"]);
+    ok(&dir, &["wait", "m", "--until", "done", "--timeout", "10"]);
+    assert_eq!(
+        ok(&dir, &["read", "m", "--lines", "1"]),
+        "[smart] you said: hi\n"
+    );
+}
+
+#[test]
+fn an_unknown_update_kind_is_skipped() {
+    let dir = temp_dir("acp-unknown");
+    let _server = Server::start(&dir);
+    start_fake(&dir, "u", "fake");
+    ok(&dir, &["send", "u", "unknown"]);
+    ok(&dir, &["wait", "u", "--until", "done", "--timeout", "10"]);
+    let logged = [
+        "wait",
+        "u",
+        "--output",
+        "skipped a session/update",
+        "--timeout",
+        "1",
+    ];
+    assert_eq!(ok(&dir, &logged), "u output\n");
+    assert_eq!(ok(&dir, &["read", "u"]), "> unknown\nstill here\n");
+    ok(&dir, &["send", "u", "hi"]);
+    ok(&dir, &["wait", "u", "--until", "done", "--timeout", "10"]);
+    assert_eq!(
+        reported(&dir, "u"),
+        json!({"state": "done", "note": "end_turn"})
     );
 }

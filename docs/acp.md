@@ -28,6 +28,8 @@ shed wait t1 --until done blocked error
 shed approve t1 allow-once        # an option id, or a kind: allow_once, reject_once, …
 shed read t1                      # > prompt, [tool] title (status), the final reply
 shed cancel t1                    # or: shed keys t1 esc
+shed model t1 opus                # one of `shed get t1`'s session.models
+shed run --acp claude-acp --resume <session id>   # load a past session (`shed get`'s session.id)
 ```
 
 `--policy allow|deny|ask` (default `ask`) answers permission requests: `allow` and `deny` pick the first
@@ -41,18 +43,27 @@ it hears nothing from the agent for `$SHED_TURN_IDLE_TIMEOUT` seconds in the env
 (default 120; note `no response`). Any update counts, so a long tool call that reports progress goes on;
 a permission request waiting for `approve` does not time out. `shed events`
 streams `turn`, `text` (reply chunks), `tool_call` (each status change), `plan`, `mode`, `approval_request`,
-`approved` and `reply` (the whole reply and its `stop_reason`) next to the usual `started`, `state` and
-`exited`; see [protocol.md](protocol.md).
+`approved`, `reply` (the whole reply and its `stop_reason`) and `session` (its id, the current `model` and the
+`models`, also kept as the terminal's `session`) next to the usual `started`, `state` and `exited`; see
+[protocol.md](protocol.md).
+
+`--resume <id>` (the `run` method's `resume`) needs an agent that advertises `loadSession`, else the terminal
+ends as `error`. The agent replays the session's history first: those events carry `"replay": true` and rebuild
+the transcript, so `read` shows the whole conversation. The session id survives a server restart in the lost
+terminal's `shed get`. `shed model` (the `acp.model` method) sets the agent's `model` config option
+(`session/set_config_option`; the SDK shed uses has no `session/set_model`).
 
 ## How it works
 
 `run --acp` starts an ordinary terminal whose program is shed's bridge (`shed acp-bridge`, hidden). The
-bridge runs the adapter with piped stdio, sends `initialize` (no `fs` or `terminal` client capabilities) and
-`session/new` (the terminal's cwd, no MCP servers), and then:
+bridge speaks ACP through the [`agent-client-protocol`](https://crates.io/crates/agent-client-protocol) SDK on a
+tokio runtime of its own. It runs the adapter with piped stdio, sends `initialize` (no `fs` or `terminal` client
+capabilities) and `session/new` (the terminal's cwd, no MCP servers) or `session/load`, and then:
 
 - reads its PTY in raw mode: `send`, `approve` and `cancel` write one framed line (`RS`, JSON, newline); a line
   typed in `attach` is a prompt; `Esc` or `Ctrl+C` alone cancels;
-- reports its events with the `emit` method and its states with `state`, over the server socket;
+- reports its events with the `emit` method and its states with `state`, as notifications over the server
+  socket, written in batches by a thread of their own;
 - appends every event to `acp/<name>.jsonl` beside the state file, which `read` renders;
 - answers requests it does not offer (file system, terminals) with "method not found".
 

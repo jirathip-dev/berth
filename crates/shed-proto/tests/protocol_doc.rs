@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json, to_value};
 use shed_proto::{
-    ApprovalOption, Color, EmitParams, ErrorCode, Event, EventKind, EventsParams, Hello,
-    KeysParams, Line, LsParams, MachineStats, Method, ReadParams, ReadResult, Reported, Request,
-    ResizeParams, Resources, Response, RpcError, Run, RunParams, Sample, ScreenUpdate, SendParams,
-    State, StateParams, StatsParams, Target, TerminalInfo, TerminalParams, TerminalResizeParams,
-    VERSION, WaitOutcome, WaitParams, WaitResult, WatchParams,
+    AcpSession, ApprovalOption, Color, EmitParams, ErrorCode, Event, EventKind, EventsParams,
+    Hello, KeysParams, Line, LsParams, MachineStats, Method, ModelParams, ReadParams, ReadResult,
+    Reported, Request, ResizeParams, Resources, Response, RpcError, Run, RunParams, Sample,
+    ScreenUpdate, SendParams, State, StateParams, StatsParams, Target, TerminalInfo,
+    TerminalParams, TerminalResizeParams, VERSION, WaitOutcome, WaitParams, WaitResult,
+    WatchParams,
 };
 
 fn info(state: State) -> TerminalInfo {
@@ -28,6 +29,18 @@ fn info(state: State) -> TerminalInfo {
         idle_after: None,
         resources: (state == State::Running).then_some(RESOURCES),
         acp: None,
+        session: None,
+    }
+}
+
+fn session() -> AcpSession {
+    AcpSession {
+        id: "sess_1".into(),
+        model: Some("opus".into()),
+        models: vec![
+            ["opus".into(), "Opus".into()],
+            ["haiku".into(), "Haiku".into()],
+        ],
     }
 }
 
@@ -85,6 +98,7 @@ fn events() -> Vec<Event> {
             text: "Fixed; all 12 tests pass.".into(),
             stop_reason: "end_turn".into(),
         },
+        EventKind::Session(session()),
     ]
     .into_iter()
     .zip(1..)
@@ -93,6 +107,7 @@ fn events() -> Vec<Event> {
         name: "build".into(),
         labels: info(State::Running).labels,
         kind,
+        replay: false,
     })
     .collect()
 }
@@ -180,6 +195,7 @@ fn run_params() -> Value {
         idle_after: None,
         cmd: vec!["make".into(), "test".into()],
         acp: None,
+        resume: None,
     })
     .unwrap()
 }
@@ -191,6 +207,7 @@ fn emit_params() -> Value {
             text: "All 12 tests pass.".into(),
             stop_reason: "end_turn".into(),
         },
+        replay: false,
     })
     .unwrap()
 }
@@ -295,6 +312,14 @@ fn example(method: Method) -> (Value, Value) {
         | Method::TerminalResize
         | Method::ReadOnly => (terminal_params(method), json!({})),
         Method::MachineStats => stats_example(),
+        Method::Model => (
+            to_value(ModelParams {
+                name: "agent".into(),
+                model: "haiku".into(),
+            })
+            .unwrap(),
+            json!({}),
+        ),
     }
 }
 
@@ -350,6 +375,20 @@ fn line(v: &impl serde::Serialize) -> String {
     serde_json::to_string(v).unwrap()
 }
 
+/// `v` with every object's keys sorted, as `serde_json` writes them without `preserve_order`: a
+/// workspace build turns that feature on (the ACP SDK needs it), a `-p shed-proto` build does not.
+fn sorted(v: Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut entries: Vec<_> = map.into_iter().map(|(k, v)| (k, sorted(v))).collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            Value::Object(entries.into_iter().collect())
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(sorted).collect()),
+        v => v,
+    }
+}
+
 fn markdown() -> String {
     let mut md = format!(
         "# shed protocol\n\n\
@@ -365,12 +404,13 @@ fn markdown() -> String {
          the exit status (128 + N for signal N), `null` while running or when the program was lost in a server\n\
          restart; `pid` is set while running; `reported` is the state the program last reported (absent until\n\
          then); `idle_after` is set when the `idle` fallback is on; `resources` is the process tree's memory\n\
-         (MiB) and CPU (percent of one core) at the last sample, while running.\n\n## Methods\n"
+         (MiB) and CPU (percent of one core) at the last sample, while running; an ACP terminal's `session` is its\n\
+         agent session (`id`, for `run`'s `resume`; the current `model` and the `models`, `[id, name]`).\n\n## Methods\n"
     );
     for method in Method::ALL {
         let (params, result) = example(method);
-        let request = Request::new(1, method, params);
-        let response = Response::ok(1.into(), result);
+        let request = Request::new(1, method, sorted(params));
+        let response = Response::ok(1.into(), sorted(result));
         write!(
             md,
             "\n### `{}`\n\n{}\n\n```json\n{}\n{}\n```\n",
@@ -387,7 +427,9 @@ fn markdown() -> String {
          `kill`) or `resources` (memory or CPU moved by more than 10 % since the last one).\n\n\
          An ACP terminal (`shed run --acp`) adds its agent's events, emitted by its bridge: `turn` (a prompt), \
          `text` (a reply chunk), `tool_call` (started or changed), `plan`, `mode`, `approval_request` (answer \
-         with `shed approve`), `approved` and `reply` (the turn's whole reply and its `stop_reason`).\n\n```json\n",
+         with `shed approve`), `approved`, `reply` (the turn's whole reply and its `stop_reason`) and `session` (the \
+         session is ready, or its model changed). A resumed session's history (`run` with `resume`) comes first, \
+         its events marked `\"replay\": true` so a client does not count them as new.\n\n```json\n",
     );
     for event in events() {
         writeln!(md, "{}", line(&event)).unwrap();

@@ -10,13 +10,28 @@ reason on stderr) on the first that does not fit. Prompts:
 - "auth": the expired-login reply of claude-acp 0.100.0, then like "slow" (that adapter never ends it).
 - "silent": nothing, then like "slow".
 - "busy": a tool call with a progress update every 0.3 s for 2.4 s, then the reply "busy done".
-- anything else: the reply "you said: <prompt>".
+- "flood N": N one-character chunks, then the reply.
+- "unknown": an update of a kind no ACP schema has, then the reply "still here".
+- anything else: the reply "you said: <prompt>" ("[<model>] you said: …" after a switch from "fast").
+
+It offers the models "fast" and "smart" (a `model` config option). `--history FILE` keeps the session's
+prompts and updates in FILE (JSON lines) and advertises loadSession, which replays them; without it
+loadSession is off.
 """
 import json
 import sys
 import time
 
 SESSION = "sess-1"
+HISTORY = sys.argv[sys.argv.index("--history") + 1] if "--history" in sys.argv else None
+MODEL = "fast"
+KEPT = []
+
+
+def options():
+    return [{"id": "model", "name": "Model", "category": "model", "type": "select",
+             "currentValue": MODEL, "options": [{"value": "fast", "name": "Fast"},
+                                                {"value": "smart", "name": "Smart"}]}]
 
 
 def fail(why):
@@ -36,7 +51,16 @@ def send(msg):
 
 
 def update(u):
+    KEPT.append(u)
     send({"method": "session/update", "params": {"sessionId": SESSION, "update": u}})
+
+
+def keep():
+    """Appends this turn's updates to the history file."""
+    if HISTORY:
+        with open(HISTORY, "a") as f:
+            f.writelines(json.dumps(u) + "\n" for u in KEPT)
+    KEPT.clear()
 
 
 def read():
@@ -95,19 +119,37 @@ def tool_turn():
 
 
 def main():
+    global MODEL
     while True:
         msg = read()
         method, params, rid = msg.get("method"), msg.get("params", {}), msg.get("id")
         if method == "initialize":
-            check(isinstance(rid, int), "initialize: id")
+            check(isinstance(rid, (int, str)), "initialize: id")
             check(params.get("protocolVersion") == 1, "initialize: protocolVersion 1")
             check(isinstance(params.get("clientCapabilities"), dict), "initialize: clientCapabilities")
-            send({"id": rid, "result": {"protocolVersion": 1, "agentCapabilities": {},
+            caps = {"loadSession": HISTORY is not None}
+            send({"id": rid, "result": {"protocolVersion": 1, "agentCapabilities": caps,
                                         "authMethods": []}})
         elif method == "session/new":
             check(str(params.get("cwd", "")).startswith("/"), "session/new: absolute cwd")
             check(params.get("mcpServers") == [], "session/new: mcpServers")
-            send({"id": rid, "result": {"sessionId": SESSION}})
+            send({"id": rid, "result": {"sessionId": SESSION, "configOptions": options()}})
+        elif method == "session/load":
+            check(HISTORY is not None, "session/load without loadSession")
+            check(params.get("sessionId") == SESSION, "session/load: sessionId")
+            check(str(params.get("cwd", "")).startswith("/"), "session/load: absolute cwd")
+            with open(HISTORY) as f:
+                for line in f:
+                    send({"method": "session/update",
+                          "params": {"sessionId": SESSION, "update": json.loads(line)}})
+            send({"id": rid, "result": {"configOptions": options()}})
+        elif method == "session/set_config_option":
+            check(params.get("sessionId") == SESSION, "set_config_option: sessionId")
+            if params.get("configId") == "model" and params.get("value") in ("fast", "smart"):
+                MODEL = params["value"]
+                send({"id": rid, "result": {"configOptions": options()}})
+            else:
+                send({"id": rid, "error": {"code": -32602, "message": f"no model {params}"}})
         elif method == "session/prompt":
             check(params.get("sessionId") == SESSION, "session/prompt: sessionId")
             blocks = params.get("prompt")
@@ -115,6 +157,8 @@ def main():
             check(all(b.get("type") == "text" and isinstance(b.get("text"), str) for b in blocks),
                   "session/prompt: text blocks")
             text = blocks[0]["text"]
+            KEPT.append({"sessionUpdate": "user_message_chunk",
+                         "content": {"type": "text", "text": text}})
             if text == "tool":
                 stop = tool_turn()
             elif text in ("slow", "auth", "silent"):
@@ -138,10 +182,22 @@ def main():
                 update({"sessionUpdate": "agent_message_chunk",
                         "content": {"type": "text", "text": "busy done"}})
                 stop = "end_turn"
-            else:
-                update({"sessionUpdate": "agent_message_chunk",
-                        "content": {"type": "text", "text": f"you said: {text}"}})
+            elif text.startswith("flood "):
+                for _ in range(int(text.split()[1])):
+                    update({"sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": "x"}})
                 stop = "end_turn"
+            elif text == "unknown":
+                update({"sessionUpdate": "brand_new_kind", "whatever": [1, 2]})
+                update({"sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "still here"}})
+                stop = "end_turn"
+            else:
+                said = f"you said: {text}" if MODEL == "fast" else f"[{MODEL}] you said: {text}"
+                update({"sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": said}})
+                stop = "end_turn"
+            keep()
             send({"id": rid, "result": {"stopReason": stop}})
         elif method == "session/cancel":
             pass

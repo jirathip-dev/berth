@@ -321,6 +321,7 @@ fn readonly<'a>(method: Method, request: &'a Request, session: &'a Session) -> O
     let input = matches!(
         method,
         Method::Send
+            | Method::Model
             | Method::Keys
             | Method::Resize
             | Method::Input
@@ -514,6 +515,7 @@ fn dispatch(
         }
         Method::State => json(&reg.state(params(request)?)?),
         Method::Emit => reg.emit(params(request)?).map(|()| empty()),
+        Method::Model => reg.model(params(request)?).map(|()| empty()),
         Method::Hello | Method::Kill | Method::Wait | Method::MachineStats => {
             Err(RpcError::new(ErrorCode::Internal, "handled above"))
         }

@@ -250,11 +250,13 @@ pub enum Method {
     ReadOnly,
     /// The machine's health: [`StatsParams`] → [`MachineStats`].
     MachineStats,
+    /// Switch an ACP terminal's model: [`ModelParams`] → `{}`.
+    Model,
 }
 
 impl Method {
     /// Every method, in documentation order.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::Hello,
         Self::Run,
         Self::Ls,
@@ -276,6 +278,7 @@ impl Method {
         Self::TerminalResize,
         Self::ReadOnly,
         Self::MachineStats,
+        Self::Model,
     ];
 
     /// The wire name.
@@ -303,6 +306,7 @@ impl Method {
             Self::TerminalResize => "terminal.resize",
             Self::ReadOnly => "terminal.readonly",
             Self::MachineStats => "machine.stats",
+            Self::Model => "acp.model",
         }
     }
 
@@ -367,6 +371,9 @@ impl Method {
             Self::MachineStats => {
                 "The machine's health now: load per CPU, memory pressure (percent of memory not available), swap used, free space on the volume of the state file, CPUs, uptime and the terminals by state (the reported state while running, else `running`; `exited`). The server keeps one sample a minute for 24 h; `since` (unix seconds) adds those after it as `history`."
             }
+            Self::Model => {
+                "Switch an ACP terminal's model to one of its `session.models`: its bridge asks the agent (`session/set_config_option`, the `model` option) and emits `session` with the new `model`."
+            }
         }
     }
 }
@@ -425,6 +432,9 @@ pub struct RunParams {
     /// The ACP agent the program bridges (`shed run --acp`): `read` renders its transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp: Option<String>,
+    /// ACP: load this agent session (`session/load`, `$SHED_ACP_RESUME` to the bridge) instead of a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<String>,
 }
 
 /// `ls` params.
@@ -577,6 +587,9 @@ pub struct Event {
     /// What happened.
     #[serde(flatten)]
     pub kind: EventKind,
+    /// ACP: a resumed session's history, replayed (`session/load`), not a new event.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay: bool,
 }
 
 /// What an [`Event`] reports; the `event` field names it.
@@ -644,6 +657,8 @@ pub enum EventKind {
         /// Why it ended: `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` or `cancelled`.
         stop_reason: String,
     },
+    /// ACP: the session is ready, or its model changed.
+    Session(AcpSession),
 }
 
 impl EventKind {
@@ -672,6 +687,19 @@ pub struct ApprovalOption {
     pub kind: String,
 }
 
+/// An ACP terminal's agent session, as its bridge last reported it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpSession {
+    /// The agent's session id, for `run --acp … --resume`.
+    pub id: String,
+    /// The current model, when the agent offers models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The models `acp.model` switches to: id and name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<[String; 2]>,
+}
+
 /// `emit` params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmitParams {
@@ -680,6 +708,18 @@ pub struct EmitParams {
     /// The event.
     #[serde(flatten)]
     pub kind: EventKind,
+    /// A resumed session's history, replayed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay: bool,
+}
+
+/// `acp.model` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelParams {
+    /// The terminal's name.
+    pub name: String,
+    /// The model id, one of the session's `models`.
+    pub model: String,
 }
 
 /// `machine.stats` params.
@@ -772,6 +812,9 @@ pub struct TerminalInfo {
     /// The ACP agent the program bridges, for an ACP terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp: Option<String>,
+    /// The ACP agent session, from the bridge's last `session` event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<AcpSession>,
 }
 
 /// `screen.watch` params.

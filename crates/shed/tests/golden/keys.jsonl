@@ -1,2 +1,2 @@
-{"id":7,"jsonrpc":"2.0","method":"keys","params":{"keys":["enter"],"name":"build"}}
+{"jsonrpc":"2.0","id":7,"method":"keys","params":{"name":"build","keys":["enter"]}}
 {"jsonrpc":"2.0","id":7,"result":{}}
