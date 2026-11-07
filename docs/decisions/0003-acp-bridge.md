@@ -25,7 +25,7 @@ process would need all of that again.
 - Schema validation is structural: the test agent (`crates/shed/tests/fake_acp.py`) checks each client
   message for the fields and types ACP v1 requires and fails the run otherwise. No JSON-schema crate.
 - No async runtime: one thread reads the agent, one reads the PTY, sharing one session lock. Superseded: the
-  bridge runs the ACP SDK on a current-thread tokio runtime (#40), and the server is on tokio too
+  bridge runs the ACP SDK on a tokio runtime (#40), and the server is on tokio too
   ([0004](0004-tokio.md)).
 
 ## Consequences

@@ -6,9 +6,9 @@
 //! The bridge reads its PTY in raw mode: a line framed by [`frame`] (`send`, `approve`, `cancel`,
 //! `model`), a plain line typed in `attach` (a prompt), or `Esc` / `Ctrl+C` alone (cancel).
 //!
-//! Its own current-thread tokio runtime runs the SDK connection, the session task, a task reading the
-//! PTY into [`Input`]s and one draining the session's outputs into the transcript, the terminal and the
-//! server (as notifications), a batch at a time.
+//! Its own tokio runtime runs the SDK connection and the session task on this thread and, on one worker
+//! beside it, a task reading the PTY into [`Input`]s and one draining the session's outputs into the
+//! transcript, the terminal and the server (as notifications), a batch at a time.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File};
@@ -785,7 +785,8 @@ fn run(
         mcp,
     };
     let resume = std::env::var("SHED_ACP_RESUME").ok();
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
         .enable_all()
         .build()?;
     let writer = runtime.spawn(writer.run(outs));

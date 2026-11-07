@@ -23,8 +23,10 @@ the sync rest with two threads. 0003 said "no async runtime"; that no longer hel
 - Events live in one shared log. `emit` is one push and one wake however many clients listen; each client
   keeps a cursor and writes all that is new as one batch. The log keeps the last 1,000 for `since` and
   everything a live client has not read, so a slow client misses nothing, as before.
-- The ACP bridge keeps its current-thread runtime; its PTY reader and writer are tasks now, and the writer
-  sends one batch per wake. The CLI stays sync: short-lived, unmeasured, and the protocol is unchanged.
+- The ACP bridge's PTY reader and writer are tasks now, and the writer sends one batch per wake. Its runtime
+  gets one worker for them, so the writer runs beside the session as the old writer thread did: on one
+  thread the ACP bench was 27% slower than the base, with the worker it is faster.
+- The CLI stays sync: short-lived, unmeasured, and the protocol is unchanged.
 - No shutdown handling is added: the server is killed, as before.
 
 ## Consequences
