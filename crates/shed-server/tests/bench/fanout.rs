@@ -21,22 +21,18 @@ fn fanout() {
         let us = (0..3)
             .map(|_| {
                 let mut events = Events::default();
-                let rxs: Vec<_> = (0..n)
-                    .map(|_| events.subscribe(EventsParams::default()).1)
+                let subs: Vec<_> = (0..n)
+                    .map(|_| events.subscribe(EventsParams::default()))
                     .collect();
                 let start = Instant::now();
                 for _ in 0..BURST {
                     events.emit("agent-terminal-1", &labels, EventKind::Started);
                 }
-                // Dropping the senders ends every stream.
+                // Each subscriber takes what the burst left it.
                 drop(events);
-                let bytes: Vec<usize> = rxs
+                let bytes: Vec<usize> = subs
                     .into_iter()
-                    .map(|mut rx| {
-                        std::iter::from_fn(|| rx.try_recv().ok())
-                            .map(|line| line.len())
-                            .sum()
-                    })
+                    .map(|mut sub| sub.take().iter().map(|line| line.len()).sum())
                     .collect();
                 let us = start.elapsed().as_micros();
                 assert!(bytes.iter().all(|&b| b == bytes[0] && b > BURST));

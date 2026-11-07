@@ -23,7 +23,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::events::{Events, Line};
+use crate::events::{Events, Subscriber};
 use crate::stats::Stats;
 
 /// The size new terminals start at.
@@ -39,7 +39,7 @@ pub(crate) enum Stream {
     /// `attach`: a redraw of the screen, then the raw output.
     Output(Vec<u8>, UnboundedReceiver<Vec<u8>>),
     /// `events`: the replayed events, then the event lines.
-    Events(Vec<u8>, UnboundedReceiver<Line>),
+    Events(Subscriber),
     /// `screen.watch`: the terminal, and the change count the client has, if any.
     Screen(Arc<Terminal>, Option<u64>),
 }
@@ -49,24 +49,18 @@ impl Stream {
     pub(crate) async fn run(self, mut out: OwnedWriteHalf) {
         match self {
             Self::Output(first, rx) => pump(&mut out, first, rx).await,
-            Self::Events(first, rx) => pump(&mut out, first, rx).await,
+            Self::Events(sub) => sub.stream(&mut out).await,
             Self::Screen(term, since) => crate::screen::watch(&term, since, &mut out).await,
         }
     }
 }
 
 /// Writes `bytes`, then all that `rx` holds at each wake as one write.
-async fn pump<T: AsRef<[u8]>>(
-    out: &mut OwnedWriteHalf,
-    mut bytes: Vec<u8>,
-    mut rx: UnboundedReceiver<T>,
-) {
+async fn pump(out: &mut OwnedWriteHalf, mut bytes: Vec<u8>, mut rx: UnboundedReceiver<Vec<u8>>) {
     let mut batch = Vec::new();
     while out.write_all(&bytes).await.is_ok() && rx.recv_many(&mut batch, 1024).await > 0 {
-        bytes.clear();
-        batch
-            .drain(..)
-            .for_each(|m| bytes.extend_from_slice(m.as_ref()));
+        bytes = batch.concat();
+        batch.clear();
     }
 }
 
@@ -370,8 +364,7 @@ impl Registry {
 
     /// `events`: the replay and the stream.
     pub(crate) fn subscribe(&mut self, p: EventsParams) -> Stream {
-        let (replay, rx) = self.events.subscribe(p);
-        Stream::Events(replay, rx)
+        Stream::Events(self.events.subscribe(p))
     }
 
     /// The live terminals, to watch.
@@ -612,9 +605,10 @@ impl Registry {
         Ok((entry.term.clone(), entry.info.clone()))
     }
 
-    /// The terminal to kill, if it still runs, marked so its exit is `killed`; the caller kills it
-    /// without holding the registry.
+    /// The terminal to kill, if it still runs after a refresh, marked so its exit is `killed`; the
+    /// caller kills it without holding the registry.
     pub(crate) fn mark_kill(&mut self, name: &str) -> Result<Option<Arc<Terminal>>, RpcError> {
+        self.refresh()?;
         let entry = self.entries.get_mut(name).ok_or_else(|| not_found(name))?;
         entry.killing = entry.info.state == State::Running;
         Ok(entry.term.clone().filter(|_| entry.killing))

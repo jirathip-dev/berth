@@ -641,11 +641,9 @@ impl Writer {
     async fn send(&mut self, calls: &[u8]) {
         for _ in 0..2 {
             if self.server.is_none() {
-                let socket = Client::connect(&self.socket).map(|c| c.split().1);
-                let socket = socket.and_then(|s| Ok(s.set_nonblocking(true).map(|()| s)?));
-                self.server = socket
-                    .and_then(|s| Ok(tokio::net::UnixStream::from_std(s)?))
-                    .ok();
+                let socket = Client::connect(&self.socket).ok().map(|c| c.split().1);
+                let socket = socket.filter(|s| s.set_nonblocking(true).is_ok());
+                self.server = socket.and_then(|s| tokio::net::UnixStream::from_std(s).ok());
             }
             let Some(server) = &mut self.server else {
                 return;
