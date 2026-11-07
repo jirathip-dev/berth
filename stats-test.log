@@ -1,0 +1,20 @@
+   Compiling serde v1.0.229
+   Compiling thiserror v2.0.21
+   Compiling shed-core v0.0.0 (/Users/jkmacmini/.herdr/worktrees/shed/issue-35/crates/shed-core)
+   Compiling shed-proto v0.0.0 (/Users/jkmacmini/.herdr/worktrees/shed/issue-35/crates/shed-proto)
+   Compiling shed-server v0.0.0 (/Users/jkmacmini/.herdr/worktrees/shed/issue-35/crates/shed-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.51s
+     Running unittests src/lib.rs (/Users/jkmacmini/.cache/herdsman/target/.scratch/berth-impl-35/target/debug/deps/shed_server-1babee586b10d355)
+
+running 2 tests
+test stats::tests::parses_macos_sysctl ... ok
+test stats::tests::one_sample_a_minute_on_a_fake_clock_and_24_hours_kept ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 6.39s
+
+     Running tests/client.rs (/Users/jkmacmini/.cache/herdsman/target/.scratch/berth-impl-35/target/debug/deps/client-a9315dcb3d2557f7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
