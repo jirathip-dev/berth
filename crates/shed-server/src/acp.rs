@@ -21,17 +21,19 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::schema::{
-    CancelNotification, ContentBlock, Implementation, InitializeRequest, LoadSessionRequest,
-    NewSessionRequest, PromptRequest, PromptResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionConfigKind as Kind, SessionConfigOption, SessionConfigOptionCategory as Category,
-    SessionConfigOptionValue, SessionConfigSelectOption, SessionConfigSelectOptions as Choices,
-    SessionId, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, TextContent,
+    AvailableCommandInput, CancelNotification, ContentBlock, Implementation, InitializeRequest,
+    LoadSessionRequest, McpServer, McpServerHttp, McpServerSse, NewSessionRequest, PromptRequest,
+    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionConfigKind as Kind, SessionConfigOption,
+    SessionConfigOptionCategory as Category, SessionConfigOptionValue, SessionConfigSelectOption,
+    SessionConfigSelectOptions as Choices, SessionId, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, TextContent,
 };
 use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{Agent, ErrorCode, JsonRpcMessage as _, Lines, UntypedMessage};
 use futures::{sink, stream};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use shed_proto::{
     AcpSession, ApprovalOption, EmitParams, EventKind, Method, Reported, StateParams,
 };
@@ -120,6 +122,41 @@ pub fn render(transcript: &str) -> String {
     clean(&lines.join("\n"))
 }
 
+/// `run`'s `mcp_servers` as the SDK's entries; an error names the first unknown or malformed one.
+///
+/// # Errors
+/// The entry's index and name, never its values.
+pub fn mcp_servers(entries: &[Value]) -> Result<Vec<McpServer>, String> {
+    let parse = |(i, e): (usize, &Value)| {
+        let known = (e.get("type")).is_none_or(|t| ["stdio", "http", "sse"].iter().any(|k| t == k));
+        let server = serde_json::from_value(e.clone()).ok().filter(|_| known);
+        let name = e.get("name").unwrap_or(&Value::Null);
+        server
+            .ok_or_else(|| format!("mcp_servers[{i}] {name}: not an ACP stdio, http or sse server"))
+    };
+    entries.iter().enumerate().map(parse).collect()
+}
+
+/// `servers` as JSON, each env and header value as `***`.
+fn redacted(servers: &[McpServer]) -> Vec<Value> {
+    let mut shown = servers.to_vec();
+    for server in &mut shown {
+        let values: Vec<&mut String> = match server {
+            McpServer::Stdio(s) => s.env.iter_mut().map(|e| &mut e.value).collect(),
+            McpServer::Http(McpServerHttp { headers, .. })
+            | McpServer::Sse(McpServerSse { headers, .. }) => {
+                headers.iter_mut().map(|h| &mut h.value).collect()
+            }
+            _ => Vec::new(),
+        };
+        for value in values {
+            "***".clone_into(value);
+        }
+    }
+    let shown = serde_json::to_value(shown).unwrap_or_default();
+    serde_json::from_value(shown).unwrap_or_default()
+}
+
 /// What the connection hands the session task, in the order the agent sent it.
 enum FromAgent {
     /// A `session/update`, or why it does not parse (a kind this SDK does not know).
@@ -176,6 +213,7 @@ struct Session {
     /// The agent's `model` config option, if it has one.
     model: Option<String>,
     shown: AcpSession,
+    mcp: Vec<McpServer>,
 }
 
 impl Session {
@@ -379,6 +417,20 @@ impl Session {
                 self.emit(EventKind::Mode { mode });
             }
             SessionUpdate::ConfigOptionUpdate(c) => return self.models(&c.config_options),
+            SessionUpdate::AvailableCommandsUpdate(u) => {
+                let commands: Vec<_> = (u.available_commands.into_iter())
+                    .map(|c| match c.input {
+                        Some(AvailableCommandInput::Unstructured(i)) => {
+                            [c.name, c.description, i.hint]
+                        }
+                        _ => [c.name, c.description, String::new()],
+                    })
+                    .collect();
+                if commands != self.shown.commands {
+                    self.shown.commands = commands;
+                    return self.models(&[]);
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -392,7 +444,8 @@ impl Session {
         }
     }
 
-    /// Takes the agent's `model` option (a select) from its config options, then emits the session.
+    /// Takes the agent's `model` option (a select) from its config options (if any), then emits the
+    /// session.
     fn models(&mut self, options: &[SessionConfigOption]) -> AcpResult<()> {
         let model = options.iter().find_map(|o| match (&o.category, &o.kind) {
             (Some(Category::Model), Kind::Select(s)) => Some((o, s)),
@@ -473,6 +526,16 @@ async fn drive(
     let init = InitializeRequest::new(ProtocolVersion::V1)
         .client_info(Implementation::new("shed", shed_proto::VERSION));
     let init = cx.send_request(init).block_task().await.map_err(refused)?;
+    let can = &init.agent_capabilities.mcp_capabilities;
+    for server in &s.mcp {
+        let (kind, name) = match server {
+            McpServer::Http(h) if !can.http => ("http", &h.name),
+            McpServer::Sse(h) if !can.sse => ("sse", &h.name),
+            _ => continue,
+        };
+        let why = format!("MCP server {name}: the agent takes no {kind} servers (mcpCapabilities)");
+        return Err(acp_error(why));
+    }
     let options = match resume {
         Some(_) if !init.agent_capabilities.load_session => {
             let why = "the agent cannot resume a session (no loadSession)";
@@ -480,7 +543,7 @@ async fn drive(
         }
         Some(id) => {
             (s.id, s.replay) = (SessionId::new(id), true);
-            let load = LoadSessionRequest::new(s.id.clone(), cwd);
+            let load = LoadSessionRequest::new(s.id.clone(), cwd).mcp_servers(s.mcp.clone());
             let loaded = cx.send_request(load).block_task().await.map_err(refused)?;
             // The updates before the response, all queued by now, are the history.
             while let Ok(m) = from_agent.try_recv() {
@@ -491,13 +554,13 @@ async fn drive(
             loaded.config_options
         }
         None => {
-            let new = NewSessionRequest::new(cwd);
+            let new = NewSessionRequest::new(cwd).mcp_servers(s.mcp.clone());
             let new = cx.send_request(new).block_task().await.map_err(refused)?;
             s.id = new.session_id;
             new.config_options
         }
     };
-    s.shown.id = s.id.to_string();
+    (s.shown.id, s.shown.mcp_servers) = (s.id.to_string(), redacted(&s.mcp));
     s.models(&options.unwrap_or_default())?;
     s.say(format!("shed: ACP session ready ({}); send a prompt", s.id))?;
     let idle = std::env::var("SHED_TURN_IDLE_TIMEOUT").map_or(120, |s| s.parse().unwrap_or(120));
@@ -634,8 +697,8 @@ fn read_input(inputs: &UnboundedSender<Input>) {
 
 /// Runs the ACP adapter `cmd` in `cwd` for terminal `$SHED` of the server on `socket` (state file
 /// `state`): `initialize`, then `session/load` of `$SHED_ACP_RESUME` (its history replayed) or
-/// `session/new` (no MCP servers), then prompts, updates and permission requests until the agent exits.
-/// Returns the agent's exit code.
+/// `session/new`, both with the MCP servers in `$SHED_ACP_MCP`, then prompts, updates and permission
+/// requests until the agent exits. Returns the agent's exit code.
 ///
 /// A failure to start is reported as the terminal's state `error`, with the reason as its note.
 ///
@@ -691,6 +754,9 @@ fn run(
     agent_id: &str,
     name: &str,
 ) -> Result<i32, Error> {
+    let mcp = std::env::var("SHED_ACP_MCP").unwrap_or_default();
+    let mcp = serde_json::from_str::<Vec<Value>>(&mcp).unwrap_or_default();
+    let mcp = mcp_servers(&mcp).map_err(Error::Acp)?;
     let (out, outs) = channel();
     let writer = Writer {
         transcript: BufWriter::new(open_transcript(state, name)?),
@@ -717,6 +783,7 @@ fn run(
         replay: false,
         model: None,
         shown: AcpSession::default(),
+        mcp,
     };
     let resume = std::env::var("SHED_ACP_RESUME").ok();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -729,6 +796,7 @@ fn run(
         let mut child = tokio::process::Command::new(program)
             .args(args)
             .current_dir(cwd)
+            .env_remove("SHED_ACP_MCP")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()

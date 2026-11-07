@@ -134,11 +134,12 @@ fn spawn(
     name: &str,
     idle_after: Option<u64>,
     history: &History,
-    resume: Option<&str>,
+    acp: &[(&str, &str)],
 ) -> Result<Terminal, shed_core::Error> {
     // $BERTH, the old name, stays for one release.
-    let resume = resume.map(|id| ("SHED_ACP_RESUME", id));
-    let env = [("SHED", name), ("BERTH", name)].into_iter().chain(resume);
+    let env = [("SHED", name), ("BERTH", name)]
+        .into_iter()
+        .chain(acp.iter().copied());
     let term = Terminal::spawn_with(cmd, cwd, env, SIZE, history)?;
     term.set_idle_after(idle_after.map(Duration::from_secs));
     Ok(term)
@@ -172,7 +173,7 @@ impl Registry {
                 if info.keep {
                     let cmd = vec![shell.clone()];
                     let history = history(path, &info.name);
-                    term = spawn(&cmd, &info.cwd, &info.name, info.idle_after, &history, None)
+                    term = spawn(&cmd, &info.cwd, &info.name, info.idle_after, &history, &[])
                         .ok()
                         .map(Arc::new);
                     if term.is_some() {
@@ -394,6 +395,7 @@ impl Registry {
         if p.labels.keys().any(|k| k.is_empty() || k.contains('=')) {
             return Err(bad("label keys must be non-empty and have no '='"));
         }
+        crate::acp::mcp_servers(&p.mcp_servers).map_err(|e| bad(&e))?;
         let name = match p.name {
             Some(name) if !valid_name(&name) => return Err(bad("name must match [A-Za-z0-9._-]+")),
             Some(name) if self.entries.contains_key(&name) => {
@@ -411,8 +413,12 @@ impl Registry {
         if let Some(log) = &history.log {
             let _ = fs::remove_file(log);
         }
-        let resume = p.resume.as_deref();
-        let term = spawn(&p.cmd, &p.cwd, &name, p.idle_after, &history, resume)
+        // The MCP servers (secrets and all) reach the bridge in its environment only.
+        let mcp = serde_json::to_string(&p.mcp_servers).map_err(internal)?;
+        let resume = p.resume.as_deref().map(|id| ("SHED_ACP_RESUME", id));
+        let mcp = (!p.mcp_servers.is_empty()).then_some(("SHED_ACP_MCP", mcp.as_str()));
+        let acp: Vec<_> = resume.into_iter().chain(mcp).collect();
+        let term = spawn(&p.cmd, &p.cwd, &name, p.idle_after, &history, &acp)
             .map_err(|e| RpcError::new(ErrorCode::SpawnFailed, format!("{name}: {e}")))?;
         let info = TerminalInfo {
             name: name.clone(),

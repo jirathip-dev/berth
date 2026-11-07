@@ -340,6 +340,10 @@ struct RunArgs {
     /// ACP: resume the agent's session ID (`shed get`'s `session.id`) instead of starting one.
     #[arg(long, value_name = "ID", requires = "acp")]
     resume: Option<String>,
+    /// ACP: MCP servers for the agent, a JSON list in ACP's shapes (`docs/acp.md`); send it again
+    /// with `--resume`.
+    #[arg(long, value_name = "FILE", requires = "acp")]
+    mcp: Option<PathBuf>,
     /// The program and its arguments.
     #[arg(last = true, required_unless_present = "acp")]
     cmd: Vec<String>,
@@ -509,6 +513,11 @@ fn run_terminal(server: &Server, json: bool, args: RunArgs) -> anyhow::Result<()
         (Some(id), None) => bridge_cmd(server.paths, id, &args.policy, args.cmd)?,
         (None, _) => args.cmd,
     };
+    let mcp_servers = match &args.mcp {
+        Some(file) => serde_json::from_slice(&std::fs::read(file)?)
+            .with_context(|| format!("{}: not a JSON list", file.display()))?,
+        None => Vec::new(),
+    };
     let params = RunParams {
         name: args.name,
         labels: args.labels.into_iter().collect(),
@@ -518,6 +527,7 @@ fn run_terminal(server: &Server, json: bool, args: RunArgs) -> anyhow::Result<()
         cmd,
         acp: args.acp,
         resume: args.resume,
+        mcp_servers,
     };
     let mut client = server.connect(Some(args.autostart))?;
     let info: TerminalInfo = client.call(Method::Run, &params)?;
