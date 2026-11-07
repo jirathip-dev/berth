@@ -1,11 +1,11 @@
 //! `screen.watch`: a terminal's screen as a full update, then the rows that changed, at most 20 a second.
 
-use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use shed_core::{Color, Snapshot, Terminal, Wake};
 use shed_proto::{self as proto, Line, Run, ScreenUpdate};
+use tokio::io::AsyncWriteExt as _;
+use tokio::net::unix::OwnedWriteHalf;
 
 /// The least time between two updates to one watcher: 20 a second.
 const EVERY: Duration = Duration::from_millis(50);
@@ -56,14 +56,8 @@ fn diff(last: Option<&Snapshot>, now: &Snapshot, seq: u64) -> Option<ScreenUpdat
     })
 }
 
-/// The update lines for `term` from now on; the channel closes once the program has exited.
-pub(crate) fn watch(term: Arc<Terminal>, since: Option<u64>) -> Receiver<Vec<u8>> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || stream(&term, since, &tx));
-    rx
-}
-
-fn stream(term: &Terminal, since: Option<u64>, tx: &Sender<Vec<u8>>) {
+/// Writes the update lines for `term` to `out` until the program has exited or a write fails.
+pub(crate) async fn watch(term: &Terminal, since: Option<u64>, out: &mut OwnedWriteHalf) {
     let (mut seq, mut now) = term.snapshot();
     let mut last = (since == Some(seq)).then(|| now.clone());
     let mut exited = false;
@@ -72,16 +66,16 @@ fn stream(term: &Terminal, since: Option<u64>, tx: &Sender<Vec<u8>>) {
             // An update (numbers, strings and flags) always serialises.
             let mut line = serde_json::to_vec(&update).unwrap_or_default();
             line.push(b'\n');
-            if tx.send(line).is_err() {
+            if out.write_all(&line).await.is_err() {
                 return;
             }
-            std::thread::sleep(EVERY);
+            tokio::time::sleep(EVERY).await;
         }
         if exited {
             return;
         }
         exited = !matches!(
-            term.wait_until(|t| t.changes() != seq, None),
+            term.wait_until(|t| t.changes() != seq, None).await,
             Ok(Wake::Matched)
         );
         last = Some(now);

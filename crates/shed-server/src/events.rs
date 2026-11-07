@@ -3,9 +3,9 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, Sender};
 
 use shed_proto::{Event, EventKind, EventsParams};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// How many events are kept for `since`.
 pub(crate) const RING: usize = 1_000;
@@ -21,7 +21,7 @@ pub(crate) struct Events {
     seq: u64,
     ring: VecDeque<(Event, Line)>,
     /// Each subscriber's label filter and its stream of event lines.
-    subs: Vec<(Labels, Sender<Line>)>,
+    subs: Vec<(Labels, UnboundedSender<Line>)>,
 }
 
 fn matches(filter: &Labels, event: &Event) -> bool {
@@ -62,7 +62,7 @@ impl Events {
     }
 
     /// The kept events after `p.since` that match `p.labels`, and the matching ones from now on.
-    pub(crate) fn subscribe(&mut self, p: EventsParams) -> (Vec<u8>, Receiver<Line>) {
+    pub(crate) fn subscribe(&mut self, p: EventsParams) -> (Vec<u8>, UnboundedReceiver<Line>) {
         let replay = match p.since {
             Some(since) => self
                 .ring
@@ -72,7 +72,7 @@ impl Events {
                 .collect(),
             None => Vec::new(),
         };
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = unbounded_channel();
         self.subs.push((p.labels, tx));
         (replay, rx)
     }
@@ -108,11 +108,14 @@ mod tests {
     #[test]
     fn every_subscriber_shares_the_one_serialised_line() {
         let mut events = Events::default();
-        let rxs: Vec<_> = (0..3)
+        let mut rxs: Vec<_> = (0..3)
             .map(|_| events.subscribe(EventsParams::default()).1)
             .collect();
         events.emit("t", &Labels::new(), EventKind::Started);
-        let lines: Vec<Line> = rxs.iter().map(|rx| rx.recv().expect("line")).collect();
+        let lines: Vec<Line> = rxs
+            .iter_mut()
+            .map(|rx| rx.try_recv().expect("line"))
+            .collect();
         let kept = &events.ring[0].1;
         assert!(lines.iter().all(|l| Arc::ptr_eq(l, kept)));
         // The ring and the three subscribers hold the one allocation.

@@ -32,7 +32,11 @@ fn fanout() {
                 drop(events);
                 let bytes: Vec<usize> = rxs
                     .into_iter()
-                    .map(|rx| rx.iter().map(|line| line.len()).sum())
+                    .map(|mut rx| {
+                        std::iter::from_fn(|| rx.try_recv().ok())
+                            .map(|line| line.len())
+                            .sum()
+                    })
                     .collect();
                 let us = start.elapsed().as_micros();
                 assert!(bytes.iter().all(|&b| b == bytes[0] && b > BURST));
