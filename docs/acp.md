@@ -30,6 +30,8 @@ shed read t1                      # > prompt, [tool] title (status), the final r
 shed cancel t1                    # or: shed keys t1 esc
 shed model t1 opus                # one of `shed get t1`'s session.models
 shed run --acp claude-acp --resume <session id>   # load a past session (`shed get`'s session.id)
+shed run --acp claude-acp --mcp servers.json      # with MCP servers (below)
+shed send t1 "/review src/"                       # a slash command is an ordinary prompt
 ```
 
 `--policy allow|deny|ask` (default `ask`) answers permission requests: `allow` and `deny` pick the first
@@ -53,12 +55,35 @@ the transcript, so `read` shows the whole conversation. The session id survives 
 terminal's `shed get`. `shed model` (the `acp.model` method) sets the agent's `model` config option
 (`session/set_config_option`; the SDK shed uses has no `session/set_model`).
 
+### MCP servers and slash commands
+
+`--mcp <file>` (the `run` method's `mcp_servers`) is a JSON list of MCP servers in ACP's shapes, which shed
+passes to the agent in `session/new` and in `session/load`:
+
+```json
+[
+  {"name": "files", "command": "/usr/local/bin/mcp-files", "args": ["--root", "."],
+   "env": [{"name": "TOKEN", "value": "…"}]},
+  {"type": "http", "name": "web", "url": "https://mcp.example/", "headers": [{"name": "Authorization", "value": "…"}]},
+  {"type": "sse", "name": "events", "url": "https://mcp.example/sse", "headers": []}
+]
+```
+
+stdio servers always go through; `http` and `sse` ones only when the agent's `initialize` advertises them
+(`mcpCapabilities`), else the terminal ends as `error` naming the server. An unknown or malformed entry is
+refused by `run` with its index and name. Env and header values reach the bridge in its environment only
+(never the agent's): shed never writes or logs them, and the `session` (event and `shed get`) shows the
+servers with each value as `***`. A resume needs `--mcp` again.
+
+The agent's slash commands (`available_commands_update`) are the session's `commands`
+(`[name, description, input hint]`); each change emits a `session` event. Run one by sending `/name …`.
+
 ## How it works
 
 `run --acp` starts an ordinary terminal whose program is shed's bridge (`shed acp-bridge`, hidden). The
 bridge speaks ACP through the [`agent-client-protocol`](https://crates.io/crates/agent-client-protocol) SDK on a
 tokio runtime of its own. It runs the adapter with piped stdio, sends `initialize` (no `fs` or `terminal` client
-capabilities) and `session/new` (the terminal's cwd, no MCP servers) or `session/load`, and then:
+capabilities) and `session/new` (the terminal's cwd and MCP servers) or `session/load`, and then:
 
 - reads its PTY in raw mode: `send`, `approve` and `cancel` write one framed line (`RS`, JSON, newline); a line
   typed in `attach` is a prompt; `Esc` or `Ctrl+C` alone cancels;

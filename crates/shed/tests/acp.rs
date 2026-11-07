@@ -599,3 +599,171 @@ fn an_unknown_update_kind_is_skipped() {
         json!({"state": "done", "note": "end_turn"})
     );
 }
+
+/// The `--mcp` file for `servers`, in a dir of its own (not shed's).
+fn mcp_file(name: &str, servers: &Value) -> PathBuf {
+    let path = temp_dir(name).join("mcp.json");
+    std::fs::write(&path, servers.to_string()).expect("write the MCP servers");
+    path
+}
+
+/// Starts the fake agent as terminal `name` (labelled `run=mcp`) with `run`'s `--mcp file` and
+/// `extra`, the fake checking it gets exactly `file`'s servers.
+fn start_with_mcp(dir: &Path, name: &str, file: &Path, extra: &[&str], fake: &[&str]) {
+    let (agent, file) = (fake_agent(), file.to_str().expect("utf-8"));
+    let run = ["run", "--name", name, "--label", "run=mcp", "--acp", "fake"];
+    let cmd = [
+        "--",
+        "python3",
+        agent.to_str().expect("utf-8"),
+        "--mcp",
+        file,
+    ];
+    ok(
+        dir,
+        &[&run[..], &["--mcp", file], extra, &cmd, fake].concat(),
+    );
+}
+
+const SECRET: &str = "s3cret-mcp-value";
+
+#[test]
+fn mcp_servers_pass_through_on_new_and_resume_with_their_values_hidden() {
+    let dir = temp_dir("acp-mcp");
+    let history = dir.join("history.jsonl");
+    let history = history.to_str().expect("utf-8");
+    let servers = |value: &str| {
+        json!([
+            {"name": "files", "command": "/bin/echo", "args": ["hi"],
+             "env": [{"name": "TOKEN", "value": value}]},
+            {"type": "http", "name": "web", "url": "https://mcp.example/",
+             "headers": [{"name": "Authorization", "value": value}]},
+        ])
+    };
+    let file = mcp_file("acp-mcp-in", &servers(SECRET));
+    let _server = Server::start(&dir);
+    let fake = ["--history", history, "--mcp-caps", "http"];
+    let ready = |name| {
+        [
+            "wait",
+            name,
+            "--output",
+            "ACP session ready",
+            "--timeout",
+            "10",
+        ]
+    };
+    let turn = |name, prompt| {
+        ok(&dir, &["send", name, prompt]);
+        ok(&dir, &["wait", name, "--until", "done", "--timeout", "10"]);
+    };
+    start_with_mcp(&dir, "m1", &file, &[], &fake);
+    ok(&dir, &ready("m1"));
+    turn("m1", "hi");
+    start_with_mcp(&dir, "m2", &file, &["--resume", "sess-1"], &fake);
+    ok(&dir, &ready("m2"));
+    turn("m2", "more");
+    let info: Value = serde_json::from_str(&ok(&dir, &["get", "m2"])).expect("JSON");
+    assert_eq!(info["session"]["mcp_servers"], servers("***"));
+
+    let events = events_until(&dir, "mcp", |e| e["name"] == "m2" && is_state("done")(e));
+    let mut shown = events.join("\n");
+    for name in ["m1", "m2"] {
+        shown.push_str(&ok(&dir, &["get", name]));
+    }
+    shown.push_str(&ok(&dir, &["ls", "--json"]));
+    assert!(shown.contains("TOKEN") && shown.contains("***"), "{shown}");
+    assert!(!shown.contains(SECRET), "{shown}");
+    let mut dirs = vec![dir.clone()];
+    while let Some(d) = dirs.pop() {
+        for entry in std::fs::read_dir(&d).expect("read the state dir") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                let text = String::from_utf8_lossy(&bytes);
+                assert!(!text.contains(SECRET), "{} has the secret", path.display());
+            }
+        }
+    }
+}
+
+#[test]
+fn sse_servers_pass_only_when_the_agent_advertises_them() {
+    let dir = temp_dir("acp-mcp-sse");
+    let _server = Server::start(&dir);
+    let servers = json!([{"type": "sse", "name": "events", "url": "https://mcp.example/sse",
+                          "headers": []}]);
+    let file = mcp_file("acp-mcp-sse-in", &servers);
+    start_with_mcp(&dir, "s1", &file, &[], &["--mcp-caps", "sse"]);
+    ok(
+        &dir,
+        &[
+            "wait",
+            "s1",
+            "--output",
+            "ACP session ready",
+            "--timeout",
+            "10",
+        ],
+    );
+    start_with_mcp(&dir, "s2", &file, &[], &["--mcp-caps", "http"]);
+    ok(&dir, &["wait", "s2", "--until", "error", "--timeout", "10"]);
+    let why = "acp: MCP server events: the agent takes no sse servers (mcpCapabilities)";
+    assert_eq!(reported(&dir, "s2"), json!({"state": "error", "note": why}));
+}
+
+#[test]
+fn unknown_or_malformed_mcp_servers_are_refused() {
+    let dir = temp_dir("acp-mcp-bad");
+    let _server = Server::start(&dir);
+    let agent = fake_agent();
+    let bad = [
+        (
+            json!([{"type": "ws", "name": "x", "command": "c"}]),
+            r#"mcp_servers[0] "x""#,
+        ),
+        (
+            json!([{"name": "f", "command": "c", "args": [], "env": []}, {"name": "y"}]),
+            r#"mcp_servers[1] "y""#,
+        ),
+        (json!({"name": "z"}), "not a JSON list"),
+    ];
+    for (servers, why) in bad {
+        let file = mcp_file("acp-mcp-bad-in", &servers);
+        let file = file.to_str().expect("utf-8");
+        let run = ["run", "--acp", "fake", "--mcp", file, "--", "python3"];
+        let out = shed(
+            &dir,
+            &[&run[..], &[agent.to_str().expect("utf-8")]].concat(),
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success() && err.contains(why),
+            "{servers}: {err}"
+        );
+    }
+    let ls: Value = serde_json::from_str(&ok(&dir, &["ls", "--json"])).expect("JSON");
+    assert_eq!(ls, json!([]));
+}
+
+#[test]
+fn each_change_of_the_slash_commands_is_one_session_event() {
+    let dir = temp_dir("acp-commands");
+    let _server = Server::start(&dir);
+    start_fake(&dir, "k", "fake");
+    ok(&dir, &["send", "k", "commands"]);
+    ok(&dir, &["wait", "k", "--until", "done", "--timeout", "10"]);
+    let commands: Vec<Value> = events_until(&dir, "k", is_state("done"))
+        .iter()
+        .map(|l| serde_json::from_str::<Value>(l).expect("JSON"))
+        .filter(|e| e["event"] == "session")
+        .map(|e| e["commands"].clone())
+        .collect();
+    let plan = json!(["plan", "Make a plan", ""]);
+    let both = json!([plan, ["review", "Review the diff", "files"]]);
+    assert_eq!(commands, [Value::Null, json!([plan]), both.clone()]);
+    let info: Value = serde_json::from_str(&ok(&dir, &["get", "k"])).expect("JSON");
+    assert_eq!(info["session"]["commands"], both);
+    assert_eq!(ok(&dir, &["read", "k"]), "> commands\ncommands sent\n");
+}

@@ -32,6 +32,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `shed run --acp … --mcp <file.json>` (the `run` method's `mcp_servers`): MCP servers in ACP's shapes (stdio,
+  `http`, `sse`) passed to the agent in `session/new` and `session/load`. `http` and `sse` need the agent's
+  `mcpCapabilities`, else the terminal ends as `error` naming the server; an unknown or malformed entry is
+  refused by `run`. Env and header values stay in memory: the `session` shows them as `***` in its new
+  `mcp_servers`, and a resume needs the list again.
+- ACP slash commands: `available_commands_update` sets the `session`'s new `commands` (`[name, description,
+  hint]`), one `session` event per change. Run one as a prompt `/name …`.
+- cooee: pin shed at this release for `RunParams.mcp_servers` and `AcpSession.mcp_servers` / `commands`.
 - ACP on the official async SDK (`agent-client-protocol` 5.0.0, on a tokio runtime the bridge owns): every ACP
   message is a typed SDK message, and an unknown `session/update` kind is shown and skipped. Events go to the
   server as notifications, batched, so a 1,000-update turn reaches a socket client about 3× sooner.

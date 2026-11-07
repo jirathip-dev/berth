@@ -12,11 +12,16 @@ reason on stderr) on the first that does not fit. Prompts:
 - "busy": a tool call with a progress update every 0.3 s for 2.4 s, then the reply "busy done".
 - "flood N": N one-character chunks, then the reply.
 - "unknown": an update of a kind no ACP schema has, then the reply "still here".
+- "commands": the slash commands /plan, the same again, then /plan and /review (with an input hint).
 - anything else: the reply "you said: <prompt>" ("[<model>] you said: …" after a switch from "fast").
 
 It offers the models "fast" and "smart" (a `model` config option). `--history FILE` keeps the session's
 prompts and updates in FILE (JSON lines) and advertises loadSession, which replays them; without it
 loadSession is off.
+
+`--mcp FILE` is the JSON list of MCP servers session/new and session/load must get (default none);
+each entry is checked against ACP's stdio, http and sse shapes. `--mcp-caps http,sse` advertises
+those `mcpCapabilities`.
 """
 import json
 import sys
@@ -25,6 +30,10 @@ import time
 SESSION = "sess-1"
 HISTORY = sys.argv[sys.argv.index("--history") + 1] if "--history" in sys.argv else None
 MODEL = "fast"
+
+
+MCP = json.load(open(sys.argv[sys.argv.index("--mcp") + 1])) if "--mcp" in sys.argv else []
+CAPS = sys.argv[sys.argv.index("--mcp-caps") + 1].split(",") if "--mcp-caps" in sys.argv else []
 KEPT = []
 
 
@@ -42,6 +51,23 @@ def fail(why):
 def check(cond, why):
     if not cond:
         fail(why)
+
+
+def check_mcp(method, servers):
+    """Exits unless `servers` fit ACP's MCP server shapes and are the ones --mcp names."""
+    pairs = lambda l: isinstance(l, list) and all(  # noqa: E731
+        isinstance(p, dict) and set(p) == {"name", "value"} for p in l)
+    for s in servers:
+        kind = s.get("type", "stdio")
+        check(isinstance(s.get("name"), str), f"{method}: mcpServers name: {s}")
+        if kind == "stdio":
+            check(isinstance(s.get("command"), str) and isinstance(s.get("args"), list)
+                  and pairs(s.get("env")), f"{method}: stdio server: {s}")
+        else:
+            check(kind in CAPS, f"{method}: {kind} server not advertised")
+            check(isinstance(s.get("url"), str) and pairs(s.get("headers")),
+                  f"{method}: {kind} server: {s}")
+    check(servers == MCP, f"{method}: mcpServers {servers} != {MCP}")
 
 
 def send(msg):
@@ -127,17 +153,19 @@ def main():
             check(isinstance(rid, (int, str)), "initialize: id")
             check(params.get("protocolVersion") == 1, "initialize: protocolVersion 1")
             check(isinstance(params.get("clientCapabilities"), dict), "initialize: clientCapabilities")
-            caps = {"loadSession": HISTORY is not None}
+            caps = {"loadSession": HISTORY is not None,
+                    "mcpCapabilities": {k: k in CAPS for k in ("http", "sse")}}
             send({"id": rid, "result": {"protocolVersion": 1, "agentCapabilities": caps,
                                         "authMethods": []}})
         elif method == "session/new":
             check(str(params.get("cwd", "")).startswith("/"), "session/new: absolute cwd")
-            check(params.get("mcpServers") == [], "session/new: mcpServers")
+            check_mcp("session/new", params.get("mcpServers"))
             send({"id": rid, "result": {"sessionId": SESSION, "configOptions": options()}})
         elif method == "session/load":
             check(HISTORY is not None, "session/load without loadSession")
             check(params.get("sessionId") == SESSION, "session/load: sessionId")
             check(str(params.get("cwd", "")).startswith("/"), "session/load: absolute cwd")
+            check_mcp("session/load", params.get("mcpServers"))
             with open(HISTORY) as f:
                 for line in f:
                     send({"method": "session/update",
@@ -186,6 +214,16 @@ def main():
                 for _ in range(int(text.split()[1])):
                     update({"sessionUpdate": "agent_message_chunk",
                             "content": {"type": "text", "text": "x"}})
+                stop = "end_turn"
+            elif text == "commands":
+                plan = {"name": "plan", "description": "Make a plan"}
+                review = {"name": "review", "description": "Review the diff",
+                          "input": {"hint": "files"}}
+                for cmds in ([plan], [plan], [plan, review]):
+                    update({"sessionUpdate": "available_commands_update",
+                            "availableCommands": cmds})
+                update({"sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "commands sent"}})
                 stop = "end_turn"
             elif text == "unknown":
                 update({"sessionUpdate": "brand_new_kind", "whatever": [1, 2]})
