@@ -13,9 +13,7 @@ All notable changes to this project are documented here. The format follows
 
 - Renamed from berth to shed: the crates (`shed`, `shed-core`, `shed-proto`, `shed-server`), the binary,
   the socket (`shed.sock`), the state and config dirs, the service units (`dev.shed.serve`,
-  `shed.service`) and the docs. On its first start on the per-user paths, `shed serve` moves an existing
-  `berth` state or config dir to the `shed` one (one rename, one log line); when both exist it leaves the
-  old one alone and warns. Terminals get `$SHED`; `$BERTH` is still set for one release. The `hello`
+  `shed.service`) and the docs. Terminals get `$SHED`. The `hello`
   carries `product: "shed"`, so a berth client or server is refused with `SHED_VERSION` instead of
   half-working. OSC 7501 is unchanged.
 

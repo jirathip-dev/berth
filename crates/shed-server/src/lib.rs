@@ -1,7 +1,7 @@
 //! shed's per-user server: the socket, JSON-RPC, the events stream and machines over SSH.
 //!
 //! [`serve`] owns the terminals and answers newline-delimited JSON-RPC 2.0 ([`shed_proto`]) on a
-//! Unix socket, one thread per connection. [`Client`] is the other end.
+//! Unix socket, one tokio task per connection. [`Client`] is the other end.
 #![forbid(unsafe_code)]
 
 pub mod acp;
@@ -18,7 +18,7 @@ use std::fs;
 use std::io::{self, BufRead as _, BufReader, BufWriter, Read as _, Write as _};
 use std::net::Shutdown;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -35,6 +35,8 @@ use serde_json::Value;
 use shed_core::proctree::{self, ProcessTable as _};
 use shed_core::{Pattern, STATES, Terminal, Wake};
 pub use shed_proto as proto;
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+use tokio::net::unix::OwnedWriteHalf;
 
 /// Errors from the server and the client.
 #[derive(Debug, thiserror::Error)]
@@ -148,38 +150,6 @@ impl Paths {
             config: xdg("XDG_CONFIG_HOME", ".config").join("shed/config.toml"),
         })
     }
-
-    /// The one-time move from the old name: each `shed` dir of the state and config files that does
-    /// not exist yet takes over a `berth` dir beside it, by rename; nothing is deleted. Returns a line
-    /// per old dir: moved, or left alone because both exist.
-    ///
-    /// # Errors
-    /// [`Error::Io`] when a rename fails.
-    pub fn move_old_dirs(&self) -> Result<Vec<String>, Error> {
-        let mut dirs: Vec<&Path> = [&self.state, &self.config]
-            .into_iter()
-            .filter_map(|p| p.parent())
-            .filter(|d| d.file_name() == Some("shed".as_ref()))
-            .collect();
-        dirs.dedup();
-        let mut lines = Vec::new();
-        for new in dirs {
-            let old = new.with_file_name("berth");
-            if !old.is_dir() {
-                continue;
-            }
-            let (from, to) = (old.display(), new.display());
-            if new.exists() {
-                lines.push(format!(
-                    "both {from} and {to} exist; the old one is left alone"
-                ));
-            } else {
-                fs::rename(&old, new)?;
-                lines.push(format!("moved {from} to {to}"));
-            }
-        }
-        Ok(lines)
-    }
 }
 
 fn lock(m: &Mutex<Registry>) -> MutexGuard<'_, Registry> {
@@ -207,18 +177,18 @@ fn watch(registry: &Arc<Mutex<Registry>>, term: Arc<Terminal>) {
 }
 
 /// Samples every running tree's memory and CPU every `every`.
-fn sample(registry: &Mutex<Registry>, every: Duration) {
-    let table = proctree::system();
+async fn sample(registry: Arc<Mutex<Registry>>, every: Duration) {
     loop {
-        std::thread::sleep(every);
-        if let Ok(procs) = table.list() {
-            lock(registry).sample(&procs, Instant::now());
+        tokio::time::sleep(every).await;
+        let procs = tokio::task::spawn_blocking(|| proctree::system().list()).await;
+        if let Ok(Ok(procs)) = procs {
+            lock(&registry).sample(&procs, Instant::now());
         }
     }
 }
 
 /// Keeps a machine sample (with the terminal counts) when one is due; the wait until the next one is.
-fn record_stats(registry: &Mutex<Registry>) -> Duration {
+async fn record_stats(registry: &Mutex<Registry>) -> Duration {
     let (wait, dir) = {
         let reg = lock(registry);
         (reg.stats.until_due(stats::unix_now()), reg.dir())
@@ -226,7 +196,9 @@ fn record_stats(registry: &Mutex<Registry>) -> Duration {
     if wait > 0 {
         return Duration::from_secs(wait);
     }
-    let sample = stats::system(&dir);
+    let Ok(sample) = tokio::task::spawn_blocking(move || stats::system(&dir)).await else {
+        return Duration::from_secs(1);
+    };
     let mut reg = lock(registry);
     let _ = reg.refresh();
     reg.record(sample);
@@ -258,20 +230,29 @@ pub fn serve(paths: &Paths, sample_every: Duration) -> Result<(), Error> {
         }
         locked => locked.map_err(io::Error::from)?,
     }
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(4));
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()?;
+    runtime.block_on(listen(paths, sample_every))
+}
+
+/// [`serve`] on its runtime, past the lock.
+async fn listen(paths: &Paths, sample_every: Duration) -> Result<(), Error> {
     let registry = Arc::new(Mutex::new(Registry::load(&paths.state)?));
     for term in lock(&registry).running() {
         watch(&registry, term);
     }
-    let sampler = Arc::clone(&registry);
-    std::thread::spawn(move || sample(&sampler, sample_every));
+    tokio::spawn(sample(Arc::clone(&registry), sample_every));
     // One machine sample now, then a timer to each next one.
-    let first = record_stats(&registry);
+    let first = record_stats(&registry).await;
     let recorder = Arc::clone(&registry);
-    std::thread::spawn(move || {
+    tokio::spawn(async move {
         let mut wait = first;
         loop {
-            std::thread::sleep(wait);
-            wait = record_stats(&recorder);
+            tokio::time::sleep(wait).await;
+            wait = record_stats(&recorder).await;
         }
     });
     if let Some(dir) = paths.socket.parent() {
@@ -284,7 +265,7 @@ pub fn serve(paths: &Paths, sample_every: Duration) -> Result<(), Error> {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
         _ => {}
     }
-    let listener = UnixListener::bind(&paths.socket)?;
+    let listener = tokio::net::UnixListener::bind(&paths.socket)?;
     fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
     // The one stdout line, `shed ready <version> <socket>`, that a client starting the server waits for.
     let _ = writeln!(
@@ -292,12 +273,10 @@ pub fn serve(paths: &Paths, sample_every: Duration) -> Result<(), Error> {
         "shed ready {VERSION} {}",
         paths.socket.display()
     );
-    for stream in listener.incoming() {
-        let stream = stream?;
-        let registry = Arc::clone(&registry);
-        std::thread::spawn(move || connection(&registry, &stream));
+    loop {
+        let (stream, _) = listener.accept().await?;
+        tokio::spawn(connection(Arc::clone(&registry), stream));
     }
-    Ok(())
 }
 
 /// One connection's state.
@@ -307,8 +286,6 @@ struct Session {
     hello: bool,
     /// An `attach` or `events` just answered: the redraw or replay, and the stream to write next.
     stream: Option<Stream>,
-    /// The connection streams output or events; responses are no longer written.
-    streaming: bool,
     /// The terminal `screen.watch` streams.
     watching: Option<String>,
     /// The terminals `terminal.readonly` marked: their input is refused.
@@ -336,36 +313,58 @@ fn readonly<'a>(method: Method, request: &'a Request, session: &'a Session) -> O
     (named.into_iter().flatten()).find(|n| input && session.readonly.contains(*n))
 }
 
-/// Answers one connection's requests, line by line, until it closes.
-fn connection(registry: &Arc<Mutex<Registry>>, stream: &UnixStream) {
+/// Answers one connection's requests, line by line, until it closes. After an `attach`, `events` or
+/// `screen.watch` a task owns the write half and streams; it ends when the read half does.
+async fn connection(registry: Arc<Mutex<Registry>>, stream: tokio::net::UnixStream) {
     let mut session = Session::default();
-    let mut out = BufWriter::new(stream);
-    for line in BufReader::new(stream).lines() {
-        let Ok(line) = line else { return };
+    let (read, out) = stream.into_split();
+    let (mut out, mut streaming) = (Some(out), None);
+    let mut lines = tokio::io::BufReader::new(read).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(response) = respond(registry, &mut session, &line)
-            && !session.streaming
-        {
-            let written = serde_json::to_writer(&mut out, &response).map_err(io::Error::from);
-            if written
-                .and_then(|()| out.write_all(b"\n"))
-                .and_then(|()| out.flush())
-                .is_err()
-            {
+        if let (Some(response), Some(out)) = (respond(&registry, &mut session, &line), &mut out) {
+            // A response (ids, values and strings) always serialises.
+            let mut bytes = serde_json::to_vec(&response).unwrap_or_default();
+            bytes.push(b'\n');
+            if out.write_all(&bytes).await.is_err() {
                 return;
             }
         }
-        if let Some(pump) = session.stream.take() {
-            let Ok(socket) = stream.try_clone() else {
-                return;
-            };
-            session.streaming = true;
-            std::thread::spawn(move || {
-                pump(&mut BufWriter::new(&socket));
-                let _ = socket.shutdown(Shutdown::Both);
-            });
+        if let Some(stream) = session.stream.take()
+            && let Some(out) = out.take()
+        {
+            streaming = Some(tokio::spawn(pump(stream, out)));
+        }
+    }
+    if let Some(task) = streaming {
+        task.abort();
+    }
+}
+
+/// A [`Stream`]'s writes, handed to a task (interim: the stream still blocks).
+struct Chan(tokio::sync::mpsc::UnboundedSender<Vec<u8>>);
+
+impl io::Write for Chan {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let closed = |_| io::Error::from(io::ErrorKind::BrokenPipe);
+        self.0.send(buf.to_vec()).map_err(closed)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Writes `stream` to `out`, the stream itself on a blocking thread (interim).
+async fn pump(stream: Stream, mut out: OwnedWriteHalf) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::task::spawn_blocking(move || stream(&mut Chan(tx)));
+    while let Some(bytes) = rx.recv().await {
+        if out.write_all(&bytes).await.is_err() {
+            return;
         }
     }
 }
@@ -447,19 +446,19 @@ fn dispatch(
             return json(&reg.get(&name)?);
         };
         drop(reg);
-        let status = term
-            .kill(registry::GRACE)
+        let status = tokio::task::block_in_place(|| term.kill(registry::GRACE))
             .map_err(|e| RpcError::new(ErrorCode::Internal, e))?;
         return json(&lock(registry).killed(&name, &term, status)?);
     }
     if method == Method::Wait {
-        return json(&wait(registry, &params(request)?)?);
+        let p = params(request)?;
+        return json(&tokio::task::block_in_place(|| wait(registry, &p))?);
     }
     if method == Method::MachineStats {
         let p: StatsParams = params(request)?;
         let dir = lock(registry).dir();
         // Sampled outside the lock: it runs `df` (and `sysctl` on macOS).
-        let now = stats::system(&dir);
+        let now = tokio::task::block_in_place(|| stats::system(&dir));
         let mut reg = lock(registry);
         reg.refresh()?;
         return json(&reg.machine_stats(now, p.since));

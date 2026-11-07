@@ -518,18 +518,18 @@ fn timing_report() {
 }
 
 #[test]
-fn a_terminal_has_shed_and_the_old_berth_name_set() {
+fn a_terminal_has_shed_set() {
     let dir = temp_dir("env");
     let _server = Server::start(&dir);
     let d = dir.to_str().expect("utf-8 dir");
-    let script = "echo \"shed=$SHED berth=$BERTH\"; read x";
+    let script = "echo \"shed=$SHED\"; read x";
     stdout(&shed_in(
         &dir,
         &[
             "run", "--name", "envs", "--cwd", d, "--", "sh", "-c", script,
         ],
     ));
-    eventually("both names", || {
-        stdout(&shed_in(&dir, &["read", "envs"])).contains("shed=envs berth=envs")
+    eventually("the name", || {
+        stdout(&shed_in(&dir, &["read", "envs"])).contains("shed=envs")
     });
 }

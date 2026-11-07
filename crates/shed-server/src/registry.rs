@@ -136,10 +136,7 @@ fn spawn(
     history: &History,
     acp: &[(&str, &str)],
 ) -> Result<Terminal, shed_core::Error> {
-    // $BERTH, the old name, stays for one release.
-    let env = [("SHED", name), ("BERTH", name)]
-        .into_iter()
-        .chain(acp.iter().copied());
+    let env = [("SHED", name)].into_iter().chain(acp.iter().copied());
     let term = Terminal::spawn_with(cmd, cwd, env, SIZE, history)?;
     term.set_idle_after(idle_after.map(Duration::from_secs));
     Ok(term)
