@@ -85,7 +85,7 @@ impl Events {
         // Unique among the live ones.
         let id = log.cursors.last_key_value().map_or(0, |(id, _)| id + 1);
         let oldest = self.seq.saturating_sub(RING);
-        let cursor = p.since.map_or(self.seq, |s| s.max(oldest));
+        let cursor = p.since.map_or(self.seq, |s| s.clamp(oldest, self.seq));
         log.cursors.insert(id, cursor);
         Subscriber {
             log: Arc::clone(&self.log),
@@ -176,6 +176,22 @@ mod tests {
         assert!(lines.len() == 3 && lines.iter().all(|l| Arc::ptr_eq(l, kept)));
         // The log and the three subscribers hold the one allocation.
         assert_eq!(Arc::strong_count(kept), 4);
+    }
+
+    /// A `since` past the last seq (a client resuming against a restarted server) still gets every new
+    /// event.
+    #[test]
+    fn since_beyond_seq_still_gets_new_events() {
+        let mut events = Events::default();
+        let mut sub = events.subscribe(EventsParams {
+            labels: Labels::new(),
+            since: Some(5),
+        });
+        assert!(sub.take().is_empty());
+        for _ in 0..3 {
+            events.emit("t", &Labels::new(), EventKind::Started);
+        }
+        assert_eq!(sub.take().len(), 3);
     }
 
     /// A subscriber that reads nothing for 5,000 events still gets them all; with none, the log stays
