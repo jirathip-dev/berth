@@ -88,7 +88,7 @@ capabilities) and `session/new` (the terminal's cwd and MCP servers) or `session
 - reads its PTY in raw mode: `send`, `approve` and `cancel` write one framed line (`RS`, JSON, newline); a line
   typed in `attach` is a prompt; `Esc` or `Ctrl+C` alone cancels;
 - reports its events with the `emit` method and its states with `state`, as notifications over the server
-  socket, written in batches by a thread of their own;
+  socket, written in batches by a task of their own;
 - appends every event to `acp/<name>.jsonl` beside the state file, which `read` renders;
 - answers requests it does not offer (file system, terminals) with "method not found".
 

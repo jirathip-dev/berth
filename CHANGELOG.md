@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The server runs on one tokio runtime: connections, streams and watchers are tasks instead of threads (20
+  terminals and 50 `events` clients: 24 threads instead of 143). Events go to every client from one shared log,
+  each client's new events written as one batch. The ACP bridge lost its two glue threads. The CLI and the
+  protocol are unchanged.
+
 - Server responses list object keys in field order instead of alphabetically (the SDK turns on serde_json's
   `preserve_order`). The JSON is the same.
 

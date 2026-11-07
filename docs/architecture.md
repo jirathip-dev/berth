@@ -22,3 +22,8 @@ or the CLI; the server puts it behind a socket; the binary only parses arguments
 Arrows point at dependencies. `shed-core` depends on no other workspace crate; CI checks it
 (`just deps`). See [decisions/0001-workspace-layout.md](decisions/0001-workspace-layout.md). ACP agents run
 through a bridge inside an ordinary terminal ([decisions/0003-acp-bridge.md](decisions/0003-acp-bridge.md)).
+
+`shed serve` runs on one tokio runtime (at most 4 workers): connections, streams, terminal watchers and the
+samplers are tasks, and each terminal's PTY is read by a plain thread of its own. Events sit in one shared log
+that each `events` client drains from its own cursor. The CLI stays synchronous. See
+[decisions/0004-tokio.md](decisions/0004-tokio.md).
