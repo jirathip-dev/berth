@@ -41,6 +41,12 @@ fn session() -> AcpSession {
             ["opus".into(), "Opus".into()],
             ["haiku".into(), "Haiku".into()],
         ],
+        // Keys in order, so the line is the same with or without serde_json's `preserve_order`.
+        mcp_servers: vec![
+            serde_json::json!({"headers": [{"name": "Authorization", "value": "***"}],
+            "name": "web", "type": "http", "url": "https://mcp.example/"}),
+        ],
+        commands: vec![["review".into(), "Review the diff".into(), "files".into()]],
     }
 }
 
@@ -196,6 +202,7 @@ fn run_params() -> Value {
         cmd: vec!["make".into(), "test".into()],
         acp: None,
         resume: None,
+        mcp_servers: Vec::new(),
     })
     .unwrap()
 }
@@ -405,7 +412,9 @@ fn markdown() -> String {
          restart; `pid` is set while running; `reported` is the state the program last reported (absent until\n\
          then); `idle_after` is set when the `idle` fallback is on; `resources` is the process tree's memory\n\
          (MiB) and CPU (percent of one core) at the last sample, while running; an ACP terminal's `session` is its\n\
-         agent session (`id`, for `run`'s `resume`; the current `model` and the `models`, `[id, name]`).\n\n## Methods\n"
+         agent session (`id`, for `run`'s `resume`; the current `model` and the `models`, `[id, name]`; `run`'s\n\
+         `mcp_servers` with each env and header value as `***`; the agent's slash `commands`, `[name, description,\n\
+         hint]`).\n\n## Methods\n"
     );
     for method in Method::ALL {
         let (params, result) = example(method);
@@ -428,7 +437,7 @@ fn markdown() -> String {
          An ACP terminal (`shed run --acp`) adds its agent's events, emitted by its bridge: `turn` (a prompt), \
          `text` (a reply chunk), `tool_call` (started or changed), `plan`, `mode`, `approval_request` (answer \
          with `shed approve`), `approved`, `reply` (the turn's whole reply and its `stop_reason`) and `session` (the \
-         session is ready, or its model changed). A resumed session's history (`run` with `resume`) comes first, \
+         session is ready, or its model or slash commands changed). A resumed session's history (`run` with `resume`) comes first, \
          its events marked `\"replay\": true` so a client does not count them as new.\n\n```json\n",
     );
     for event in events() {

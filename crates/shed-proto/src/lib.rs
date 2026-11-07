@@ -324,7 +324,7 @@ impl Method {
                 "The handshake; must come first on every connection. Another product or version is refused with `SHED_VERSION`."
             }
             Self::Run => {
-                "Start a terminal. `name` defaults to the first free `tN`; `keep` brings it back as a shell in its cwd after a server restart."
+                "Start a terminal. `name` defaults to the first free `tN`; `keep` brings it back as a shell in its cwd after a server restart. ACP: `mcp_servers` (stdio, `http`, `sse`, in ACP's shapes) go to the agent; their env and header values are never saved or shown."
             }
             Self::Ls => {
                 "List terminals, by name; `labels` keeps those that carry every given label."
@@ -435,6 +435,10 @@ pub struct RunParams {
     /// ACP: load this agent session (`session/load`, `$SHED_ACP_RESUME` to the bridge) instead of a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<String>,
+    /// ACP: MCP servers for the agent, in ACP's shapes: stdio `{name, command, args, env}`, or
+    /// `{type: "http" | "sse", name, url, headers}`. Kept in memory only; send them again to resume.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<Value>,
 }
 
 /// `ls` params.
@@ -657,7 +661,7 @@ pub enum EventKind {
         /// Why it ended: `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` or `cancelled`.
         stop_reason: String,
     },
-    /// ACP: the session is ready, or its model changed.
+    /// ACP: the session is ready, or its model or slash commands changed.
     Session(AcpSession),
 }
 
@@ -698,6 +702,12 @@ pub struct AcpSession {
     /// The models `acp.model` switches to: id and name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<[String; 2]>,
+    /// The `run`'s `mcp_servers`, each env and header value as `***`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<Value>,
+    /// The agent's slash commands (a prompt `/name …` runs one): name, description, input hint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<[String; 3]>,
 }
 
 /// `emit` params.
